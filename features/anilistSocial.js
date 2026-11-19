@@ -47,7 +47,8 @@ function snapshot(m) {
   return {
     mediaId: m.id,
     title: titleOf(m),
-    cover: m.coverImage?.large || m.coverImage?.medium || null,
+    cover: m.coverImage?.extraLarge || m.coverImage?.large || m.coverImage?.medium || null,
+    banner: m.bannerImage || null,
     siteUrl: m.siteUrl || `https://anilist.co/anime/${m.id}`,
     color: m.coverImage?.color || null,
     year: m.seasonYear || null,
@@ -165,6 +166,33 @@ async function getCompletedBetween(anilistId, fromInt, toInt) {
   });
 }
 
+const trendingCache = cached('trending', 30 * 60 * 1000, 20);
+async function getTrending(perPage = 10, sort = 'TRENDING_DESC') {
+  return trendingCache(`${sort}|${perPage}`, async () => {
+    const data = await anilistQuery(
+      `query ($n: Int, $sort: [MediaSort]) {
+        Page(perPage: $n) { media(type: ANIME, sort: $sort, isAdult: false) { ${MEDIA_FIELDS} } }
+      }`,
+      { n: perPage, sort: [sort] }
+    );
+    return data.data.Page?.media || [];
+  });
+}
+
+// A random pick from the ~2,500 most popular anime (optionally one genre).
+async function getRandomAnime(genre = null, retry = false) {
+  const page = 1 + Math.floor(Math.random() * (retry ? 10 : genre ? 120 : 500));
+  const data = await anilistQuery(
+    `query ($page: Int, $genre: String) {
+      Page(page: $page, perPage: 5) { media(type: ANIME, sort: POPULARITY_DESC, isAdult: false, genre: $genre) { id } }
+    }`,
+    { page, genre }
+  );
+  const list = data.data.Page?.media || [];
+  if (!list.length && genre && !retry) return getRandomAnime(genre, true); // rarer genre: stay near the top
+  return list.length ? list[Math.floor(Math.random() * list.length)].id : null;
+}
+
 /* ------------------------------ AnimeThemes ------------------------------ */
 // https://api.animethemes.moe — openings/endings with song, artists, videos.
 
@@ -211,5 +239,7 @@ module.exports = {
   getProfileSnapshot,
   getCompletedBetween,
   getOpenings,
+  getTrending,
+  getRandomAnime,
   fuzzyInt,
 };

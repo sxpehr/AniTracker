@@ -1,3 +1,18 @@
+# Profile design pass + usability commands
+
+- **Header:** the painted and featured-anime banners now come back as one image with your avatar large and overlapping the banner's bottom edge, ringed in your accent. The name uses the largest heading, the tagline sits right under it as a quote, and the @handle, AniList link and theme are small underneath. Stats come straight after. Custom image or GIF banners are shown untouched, with the avatar beside the name.
+- **Featured anime:** the anime's banner (unless your whole header already uses it), then the HD cover beside a big title, details and your note.
+- **In Rotation:** each show is a row with a progress ring (the cover inside a ring that fills in your accent colour over a muted track) and a clear "**7** / 12 episodes · 58%". Titles stay clickable.
+- **Navigation:** one consistent block. The current tab is blurple and the rest neutral. The AniList link replaces Customize (customizing is only in `/settings`).
+- **Banners:** any https image or animated **GIF** link works. Giphy page links are converted automatically, and Tenor page links get a hint on how to copy the real address.
+- **HD images:** covers everywhere use AniList's largest size (older saved items are upgraded on the fly).
+- **Shared reviews stay in sync:** editing a review updates every shared copy, deleting it removes them, and sharing again in the same channel replaces the old copy.
+- **Rotation editing:** "Remove from rotation" (shows from AniList are hidden here, your AniList isn't touched; shows you added by hand are deleted), "Bring back a hidden show", plus `/rotation add · remove · view`.
+- **New commands:** `/anime info · search · trending · random · airing` (with Watch later / Favorite / Rotation / Review / Lists buttons), `/watchlater add · remove · view`, `/myfavorites add · remove · view`. Remove suggestions come from your own list.
+- **Buttons:** 🤍 white heart on the red Like/Helpful buttons, and 🗂️ for Save to list.
+
+---
+
 # AniTracker — Profiles, Customization & Reviews update
 
 Nothing to configure: push and Render deploys it. Slash commands register themselves on startup.

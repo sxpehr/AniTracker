@@ -1,7 +1,7 @@
 const { ModalBuilder, TextInputBuilder, TextInputStyle, LabelBuilder, TextDisplayBuilder, StringSelectMenuBuilder, PermissionFlagsBits } = require('discord.js');
 const ui = require('./ui');
 const social = require('./social');
-const { THEMES, paletteFor, parseHex, hex, bannerUrlFor } = require('./themes');
+const { THEMES, paletteFor, parseHex, hex, bannerUrlFor, headerUrlFor, normalizeImageUrl } = require('./themes');
 const { ctx } = require('./ctx');
 const { snapshot, getOpenings, titleOf } = require('./anilistSocial');
 const picker = require('./picker');
@@ -113,7 +113,7 @@ async function panelBlocks(userId, d, interaction) {
     const modes = {
       theme: ['Theme art', '✨', 'A banner painted from your theme colours'],
       featured: ['Featured anime', '🎞️', 'Your featured anime’s banner, tinted to your theme'],
-      url: ['My own image', '🖼️', 'Any https image link'],
+      url: ['My own image or GIF', '🖼️', 'Any image or animated GIF link'],
       none: ['No banner', '➖', 'Keep it compact'],
     };
     blocks.push(ui.text(ui.label('Banner')));
@@ -307,12 +307,14 @@ async function previewCard(userId, d) {
   }
   const name = u.profile.displayName || user?.globalName || user?.username || 'You';
   const children = [ui.text('-# 👁️ LIVE PREVIEW')];
-  const banner = bannerUrlFor(u.profile);
+  const headerImg = headerUrlFor(u.profile, user);
+  const banner = headerImg || bannerUrlFor(u.profile);
   const g = banner ? ui.gallery([{ url: banner, description: 'Banner preview' }]) : null;
   if (g) children.push(g);
-  const lines = [`## ${ui.esc(name)}`, `-# ${user ? `@${user.username} · ` : ''}${pal.name} theme`];
-  if (u.profile.tagline) lines.push(`*${ui.softEsc(u.profile.tagline)}*`);
-  children.push(ui.row(lines, user?.displayAvatarURL?.({ size: 256, extension: 'png' })));
+  const lines = [`# ${ui.esc(name)}`];
+  if (u.profile.tagline) lines.push(`*“${ui.softEsc(u.profile.tagline)}”*`);
+  lines.push(`-# ${user ? `@${user.username} · ` : ''}${pal.name} theme`);
+  children.push(headerImg && g ? ui.text(lines.join('\n')) : ui.row(lines, user?.displayAvatarURL?.({ size: 512, extension: 'png' })));
   if (u.profile.bio && u.profile.sections.includes('bio')) children.push(ui.text(ui.softEsc(ui.clip(u.profile.bio, 300))));
   const f = u.profile.featured;
   if (f && u.profile.sections.includes('featured')) children.push(ui.row([ui.label('Featured'), `**${ui.esc(f.title)}**`], f.cover));
@@ -401,12 +403,15 @@ function colorModal(p) {
 }
 
 function bannerModal(p) {
-  const t = new TextInputBuilder().setCustomId('url').setStyle(TextInputStyle.Short).setMaxLength(400).setRequired(true).setPlaceholder('https://…/my-banner.png');
+  const t = new TextInputBuilder().setCustomId('url').setStyle(TextInputStyle.Short).setMaxLength(400).setRequired(true).setPlaceholder('https://…/banner.gif  ·  .png  ·  .jpg  ·  giphy link');
   if (p.bannerUrl) t.setValue(p.bannerUrl);
   return new ModalBuilder()
     .setCustomId('s:m:bannerurl')
     .setTitle('Banner image')
-    .addLabelComponents(new LabelBuilder().setLabel('Image link').setDescription('Wide images (about 4:1) look best').setTextInputComponent(t));
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent('Paste a **direct link** to an image or **GIF** (GIFs animate!). Wide images around 4:1 look best.\n-# Tenor/Discord GIF: open it, right-click → **Copy image address**. Giphy page links work as-is.')
+    )
+    .addLabelComponents(new LabelBuilder().setLabel('Image or GIF link').setTextInputComponent(t));
 }
 
 function featNoteModal(p) {
@@ -655,11 +660,11 @@ async function onModal(interaction) {
     d.cat = 'look';
   }
   if (what === 'bannerurl') {
-    const url = interaction.fields.getTextInputValue('url').trim();
-    if (/^https:\/\/\S+$/i.test(url)) {
+    const url = normalizeImageUrl(interaction.fields.getTextInputValue('url'));
+    if (/^https:\/\/\S+$/i.test(url) && !/^https:\/\/(www\.)?tenor\.com\/view\//i.test(url)) {
       p.bannerUrl = url;
       p.bannerMode = 'url';
-    } else note = '⚠️ That link needs to start with https://';
+    } else note = /tenor\.com\/view/i.test(url) ? '⚠️ That’s a Tenor page — open the GIF, right-click → Copy image address, and paste that' : '⚠️ That link needs to start with https://';
     changed(d);
   }
   if (what === 'featnote' && p.featured) {

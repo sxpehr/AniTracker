@@ -11,6 +11,24 @@ const base = (name, description) =>
     .setContexts(InteractionContextType.Guild)
     .setIntegrationTypes(ApplicationIntegrationType.GuildInstall);
 
+// view / add / remove for a personal list
+const listCommand = (name, description, emoji) =>
+  base(name, description)
+    .addSubcommand((sc) => sc.setName('view').setDescription(`${emoji} Open it — reorder, notes, remove`))
+    .addSubcommand((sc) => {
+      sc.setName('add')
+        .setDescription(`${emoji} Add an anime`)
+        .addStringOption((o) => o.setName('anime').setDescription('Start typing a title…').setRequired(true).setAutocomplete(true));
+      if (name !== 'rotation') sc.addStringOption((o) => o.setName('note').setDescription('Optional note').setRequired(false).setMaxLength(140));
+      return sc;
+    })
+    .addSubcommand((sc) =>
+      sc
+        .setName('remove')
+        .setDescription(`${emoji} Remove an anime`)
+        .addStringOption((o) => o.setName('anime').setDescription('Pick from your list').setRequired(true).setAutocomplete(true))
+    );
+
 const commands = [
   base('track', "Start posting an AniList user's activity in this server").addStringOption((opt) =>
     opt.setName('username').setDescription('AniList username').setRequired(true).setMaxLength(50)
@@ -29,8 +47,53 @@ const commands = [
         .setRequired(true)
         .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
     ),
-  base('watchlater', 'Your Watch Later backlog — reorder, mark started, remove'),
-  base('myfavorites', 'Your favorites — reorder, add notes, feature one on your profile'),
+  listCommand('watchlater', 'Your Watch Later backlog', '📌'),
+  listCommand('myfavorites', 'Your all-time favorites', '⭐'),
+  listCommand('rotation', 'What you’re watching right now (In Rotation)', '🔄'),
+  base('anime', 'Look up any anime')
+    .addSubcommand((sc) =>
+      sc
+        .setName('info')
+        .setDescription('Details, seasons, cast, trailer — plus quick actions')
+        .addStringOption((o) => o.setName('anime').setDescription('Start typing a title…').setRequired(true).setAutocomplete(true))
+        .addBooleanOption((o) => o.setName('share').setDescription('Post it in the channel instead of just for you').setRequired(false))
+    )
+    .addSubcommand((sc) =>
+      sc
+        .setName('search')
+        .setDescription('Search AniList by name')
+        .addStringOption((o) => o.setName('query').setDescription('What to search for').setRequired(true).setMaxLength(80))
+        .addBooleanOption((o) => o.setName('share').setDescription('Post it in the channel').setRequired(false))
+    )
+    .addSubcommand((sc) =>
+      sc
+        .setName('trending')
+        .setDescription('What’s trending, most popular or highest rated')
+        .addStringOption((o) =>
+          o
+            .setName('sort')
+            .setDescription('Which list')
+            .setRequired(false)
+            .addChoices({ name: '🔥 Trending now', value: 'TRENDING_DESC' }, { name: '❤️ Most popular', value: 'POPULARITY_DESC' }, { name: '🏆 Highest rated', value: 'SCORE_DESC' })
+        )
+        .addBooleanOption((o) => o.setName('share').setDescription('Post it in the channel').setRequired(false))
+    )
+    .addSubcommand((sc) =>
+      sc
+        .setName('random')
+        .setDescription('Can’t decide? Get a random popular anime')
+        .addStringOption((o) =>
+          o
+            .setName('genre')
+            .setDescription('Only this genre')
+            .setRequired(false)
+            .addChoices(
+              ...['Action', 'Adventure', 'Comedy', 'Drama', 'Fantasy', 'Horror', 'Mecha', 'Music', 'Mystery', 'Psychological', 'Romance', 'Sci-Fi', 'Slice of Life', 'Sports', 'Supernatural', 'Thriller'].map((g) => ({ name: g, value: g }))
+            )
+        )
+        .addBooleanOption((o) => o.setName('share').setDescription('Post it in the channel').setRequired(false))
+    )
+    .addSubcommand((sc) => sc.setName('airing').setDescription('When the next episodes of your rotation air')),
   base('recommendanimes', 'The most-recommended anime — this server or global'),
   base('favorites', "Show someone's AniList favourites").addStringOption((opt) =>
     opt.setName('username').setDescription('AniList username').setRequired(true).setMaxLength(50)

@@ -39,6 +39,12 @@ const text = (content) => new TextDisplayBuilder().setContent(String(content).sl
 const divider = (big = false) => new SeparatorBuilder().setDivider(true).setSpacing(big ? SeparatorSpacingSize.Large : SeparatorSpacingSize.Small);
 const gap = (big = false) => new SeparatorBuilder().setDivider(false).setSpacing(big ? SeparatorSpacingSize.Large : SeparatorSpacingSize.Small);
 
+// AniList cover sizes are small < medium < large; always serve the largest so
+// covers stay crisp (HD) wherever they're shown.
+function hd(url) {
+  return typeof url === 'string' ? url.replace('/cover/small/', '/cover/large/').replace('/cover/medium/', '/cover/large/') : url;
+}
+
 function isHttpUrl(u) {
   return typeof u === 'string' && /^https?:\/\/\S+$/i.test(u);
 }
@@ -47,7 +53,7 @@ function isHttpUrl(u) {
 function section(lines, accessory) {
   const s = new SectionBuilder().addTextDisplayComponents(...[].concat(lines).filter(Boolean).slice(0, 3).map((l) => text(l)));
   if (accessory instanceof ButtonBuilder) s.setButtonAccessory(accessory);
-  else if (isHttpUrl(accessory)) s.setThumbnailAccessory(new ThumbnailBuilder().setURL(accessory));
+  else if (isHttpUrl(accessory)) s.setThumbnailAccessory(new ThumbnailBuilder().setURL(hd(accessory)));
   else return null; // a Section must have an accessory — caller falls back to plain text
   return s;
 }
@@ -63,7 +69,7 @@ function gallery(items) {
   if (!valid.length) return null;
   return new MediaGalleryBuilder().addItems(
     ...valid.map((i) => {
-      const item = new MediaGalleryItemBuilder().setURL(i.url);
+      const item = new MediaGalleryItemBuilder().setURL(hd(i.url));
       if (i.description) item.setDescription(String(i.description).slice(0, 256));
       if (i.spoiler) item.setSpoiler(true);
       return item;
@@ -189,6 +195,14 @@ function fit(cards, { rows = [], files } = {}) {
         if (u) entries.forEach((e) => (e.unit === u || e.memberOf === u) && (e.dropped = true));
       }
   }
+  // Then put back any dropped unit that still fits (top to bottom), so a big
+  // section near the end doesn't take smaller ones with it.
+  const droppedUnits = [...new Set(entries.filter((e) => e.dropped && e.unit).map((e) => e.unit))];
+  for (const u of droppedUnits) {
+    const members = entries.filter((e) => e.unit === u || e.memberOf === u);
+    members.forEach((e) => (e.dropped = false));
+    if (over()) members.forEach((e) => (e.dropped = true));
+  }
   if (total() > MAX_COMPONENTS || chars() > MAX_TEXT) {
     console.warn(`[ui] message still over limits after trimming (${total()} components, ${chars()} chars)`);
   }
@@ -313,5 +327,6 @@ module.exports = {
   shortDate,
   hours,
   isHttpUrl,
+  hd,
   countJson,
 };

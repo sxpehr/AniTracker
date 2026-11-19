@@ -177,11 +177,112 @@ async function paintFeaturedBanner(imageUrl, bg, accent) {
   return src.quality(86).getBufferAsync(Jimp.MIME_JPEG);
 }
 
+/* ------------------------- profile header art ------------------------- */
+
+async function fetchImage(url, timeout = 8000) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(timeout) });
+  if (!res.ok) throw new Error(`image ${res.status}`);
+  return Jimp.read(Buffer.from(await res.arrayBuffer()));
+}
+
+// Draws `src` into `dst` as a circle (anti-aliased edge) centred at cx,cy.
+function drawCircle(dst, src, cx, cy, r) {
+  src.cover(Math.ceil(r * 2), Math.ceil(r * 2));
+  const D = dst.bitmap;
+  const S = src.bitmap;
+  for (let y = Math.max(0, Math.floor(cy - r)); y < Math.min(D.height, Math.ceil(cy + r)); y++) {
+    for (let x = Math.max(0, Math.floor(cx - r)); x < Math.min(D.width, Math.ceil(cx + r)); x++) {
+      const d = Math.hypot(x + 0.5 - cx, y + 0.5 - cy);
+      const a = Math.max(0, Math.min(1, r - d + 0.5));
+      if (a <= 0) continue;
+      const sx = Math.min(S.width - 1, Math.max(0, Math.floor(x - (cx - r))));
+      const sy = Math.min(S.height - 1, Math.max(0, Math.floor(y - (cy - r))));
+      const si = (sy * S.width + sx) * 4;
+      const di = (y * D.width + x) * 4;
+      const sa = (S.data[si + 3] / 255) * a;
+      const da = D.data[di + 3] / 255;
+      const oa = sa + da * (1 - sa);
+      for (let k = 0; k < 3; k++) D.data[di + k] = oa ? clamp((S.data[si + k] * sa + D.data[di + k] * da * (1 - sa)) / oa) : 0;
+      D.data[di + 3] = clamp(oa * 255);
+    }
+  }
+}
+
+// Filled ring (annulus) in one colour, anti-aliased, optional arc (0..1 from 12 o'clock, clockwise).
+function drawRing(dst, cx, cy, rOuter, rInner, color, alpha = 1, arc = 1) {
+  const D = dst.bitmap;
+  const [cr, cg, cb] = rgb(color);
+  for (let y = Math.max(0, Math.floor(cy - rOuter)); y < Math.min(D.height, Math.ceil(cy + rOuter)); y++) {
+    for (let x = Math.max(0, Math.floor(cx - rOuter)); x < Math.min(D.width, Math.ceil(cx + rOuter)); x++) {
+      const dx = x + 0.5 - cx;
+      const dy = y + 0.5 - cy;
+      const d = Math.hypot(dx, dy);
+      let a = Math.max(0, Math.min(1, rOuter - d + 0.5)) * Math.max(0, Math.min(1, d - rInner + 0.5));
+      if (a <= 0) continue;
+      if (arc < 1) {
+        const ang = (Math.atan2(dx, -dy) / (2 * Math.PI) + 1) % 1; // 0 at top, clockwise
+        if (ang > arc) continue;
+      }
+      a *= alpha;
+      const di = (y * D.width + x) * 4;
+      const da = D.data[di + 3] / 255;
+      const oa = a + da * (1 - a);
+      D.data[di] = clamp((cr * a + D.data[di] * da * (1 - a)) / oa);
+      D.data[di + 1] = clamp((cg * a + D.data[di + 1] * da * (1 - a)) / oa);
+      D.data[di + 2] = clamp((cb * a + D.data[di + 2] * da * (1 - a)) / oa);
+      D.data[di + 3] = clamp(oa * 255);
+    }
+  }
+}
+
+// Profile header: the banner, with the avatar overlapping its bottom edge.
+// Everything below the banner is transparent, so the avatar sits on the
+// card itself in both light and dark Discord themes.
+const HEADER_BAND = 140;
+const AVATAR_R = 112;
+async function paintProfileHeader({ bannerBuf, avatarUrl, accent }) {
+  const banner = await Jimp.read(bannerBuf);
+  banner.cover(W, H);
+  const img = new Jimp(W, H + HEADER_BAND, 0x00000000);
+  img.composite(banner, 0, 0);
+  const cx = 64 + AVATAR_R;
+  const cy = H; // centred on the banner's bottom edge
+  // soft shadow, accent ring, then the avatar
+  drawRing(img, cx, cy + 4, AVATAR_R + 18, 0, 0x000000, 0.25);
+  drawRing(img, cx, cy, AVATAR_R + 12, 0, accent, 1);
+  try {
+    const av = await fetchImage(avatarUrl);
+    drawCircle(img, av, cx, cy, AVATAR_R);
+  } catch {
+    drawRing(img, cx, cy, AVATAR_R, 0, 0x5865f2, 1);
+  }
+  return img.getBufferAsync(Jimp.MIME_PNG);
+}
+
+// Progress ring: the cover in a circle, wrapped by an accent arc over a muted track.
+async function paintRing({ coverUrl, progress, total, accent }) {
+  const S = 256;
+  const img = new Jimp(S, S, 0x00000000);
+  const c = S / 2;
+  const ratio = total > 0 ? Math.max(0, Math.min(1, progress / total)) : 0;
+  drawRing(img, c, c, c - 2, c - 22, 0x80848e, 0.35);
+  if (ratio > 0) drawRing(img, c, c, c - 2, c - 22, accent, 1, ratio);
+  try {
+    const cover = await fetchImage(coverUrl);
+    drawCircle(img, cover, c, c, c - 32);
+  } catch {
+    drawRing(img, c, c, c - 32, 0, 0x2b2d31, 1);
+  }
+  return img.getBufferAsync(Jimp.MIME_PNG);
+}
+
 /* -------------------------- serving + caching -------------------------- */
 
 const bannerCache = new Map(); // key -> Buffer
 const inflight = new Map();
-const MAX_BANNERS = 40;
+const MAX_BANNERS = 120;
+const MAX_CACHE_BYTES = 30 * 1024 * 1024;
+let cacheBytes = 0;
 
 async function cachedBanner(key, paint) {
   if (bannerCache.has(key)) return bannerCache.get(key);
@@ -189,7 +290,13 @@ async function cachedBanner(key, paint) {
   const p = paint()
     .then((buf) => {
       bannerCache.set(key, buf);
-      if (bannerCache.size > MAX_BANNERS) bannerCache.delete(bannerCache.keys().next().value);
+      cacheBytes += buf.length;
+      // bounded by count AND total size (header PNGs can be a few hundred KB)
+      while (bannerCache.size > MAX_BANNERS || cacheBytes > MAX_CACHE_BYTES) {
+        const k = bannerCache.keys().next().value;
+        cacheBytes -= bannerCache.get(k).length;
+        bannerCache.delete(k);
+      }
       return buf;
     })
     .finally(() => inflight.delete(key));
@@ -217,6 +324,40 @@ function bannerUrlFor(profile = {}) {
     return `${base}/banner/${BANNER_VERSION}/anime/${Number(profile.featured.mediaId)}/${hex6(pal.bg)}-${hex6(pal.accent)}.jpg`;
   }
   return `${base}/banner/${BANNER_VERSION}/theme/${hex6(pal.bg)}-${hex6(pal.accent)}-${hex6(pal.accent2)}.jpg`;
+}
+
+function hdCover(url) {
+  // AniList CDN sizes: small < medium < large. Always ask for the largest.
+  return typeof url === 'string' ? url.replace('/cover/small/', '/cover/large/').replace('/cover/medium/', '/cover/large/') : url;
+}
+
+// Header image (banner + overlapping avatar) for painted/featured banners.
+// Custom image links (incl. GIFs) are shown as-is, so they return null here.
+function headerUrlFor(profile = {}, user) {
+  const base = publicUrl();
+  const mode = profile.bannerMode || 'theme';
+  if (!base || !user || mode === 'url' || mode === 'none') return null;
+  const pal = paletteFor(profile);
+  const v = encodeURIComponent((user.avatar || 'default').slice(0, 40));
+  const colors = `${hex6(pal.bg)}-${hex6(pal.accent)}-${hex6(pal.accent2)}`;
+  const anime = mode === 'featured' && profile.featured?.mediaId ? `&anime=${Number(profile.featured.mediaId)}` : '';
+  return `${base}/header/v1/${user.id}.png?c=${colors}&av=${v}${anime}`;
+}
+
+function ringUrl(mediaId, progress, total, accent) {
+  const base = publicUrl();
+  if (!base) return null;
+  return `${base}/ring/v1/${Number(mediaId)}/${Math.max(0, progress | 0)}-${Math.max(0, total | 0)}/${hex6(accent)}.png`;
+}
+
+// giphy.com/gifs/name-ID page links → the direct GIF, so they animate.
+function normalizeImageUrl(url) {
+  const u = String(url || '').trim();
+  const g = u.match(/^https?:\/\/(?:www\.)?giphy\.com\/gifs\/(?:[\w-]*-)?([A-Za-z0-9]+)\/?$/);
+  if (g) return `https://media.giphy.com/media/${g[1]}/giphy.gif`;
+  const gm = u.match(/^https?:\/\/media\d*\.giphy\.com\/media\/(?:v1\.[^/]+\/)?([A-Za-z0-9]+)\//);
+  if (gm) return `https://media.giphy.com/media/${gm[1]}/giphy.gif`;
+  return u;
 }
 
 function buildBannerRouter() {
@@ -261,10 +402,69 @@ function buildBannerRouter() {
     }
   });
 
+  // Profile header: banner + overlapping avatar (avatar looked up from Discord).
+  router.get('/header/v1/:userId.png', async (req, res) => {
+    const userId = String(req.params.userId);
+    const m = String(req.query.c || '').match(/^([0-9a-f]{6})-([0-9a-f]{6})-([0-9a-f]{6})$/i);
+    const animeId = parseInt(req.query.anime, 10) || null;
+    if (!/^\d{5,25}$/.test(userId) || !m) return res.status(400).end();
+    const [bg, a, a2] = m.slice(1).map((h) => parseInt(h, 16));
+    try {
+      const key = `h:${userId}:${m[0]}:${animeId || ''}:${req.query.av || ''}`;
+      const buf = await cachedBanner(key, async () => {
+        let bannerBuf;
+        if (animeId) {
+          const media = await getMediaLite(animeId).catch(() => null);
+          const src = media?.bannerImage || media?.coverImage?.extraLarge;
+          bannerBuf = src ? await paintFeaturedBanner(src, bg, a).catch(() => null) : null;
+        }
+        if (!bannerBuf) bannerBuf = await cachedBanner(`t:${m[0]}`, () => paintThemeBanner(bg, a, a2));
+        let avatarUrl = `https://cdn.discordapp.com/embed/avatars/0.png`;
+        try {
+          const { ctx } = require('./ctx');
+          const user = ctx.client?.users.cache.get(userId) || (await ctx.client?.users.fetch(userId));
+          if (user) avatarUrl = user.displayAvatarURL({ extension: 'png', size: 256 });
+        } catch {
+          /* default avatar */
+        }
+        return paintProfileHeader({ bannerBuf, avatarUrl, accent: a });
+      });
+      sendImage(res, buf, 'png');
+    } catch (e) {
+      console.error('Header image failed:', e.message);
+      res.status(500).end();
+    }
+  });
+
+  // Progress ring thumbnail for "In Rotation".
+  router.get('/ring/v1/:id/:pt/:accent.png', async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const pt = String(req.params.pt).match(/^(\d{1,5})-(\d{1,5})$/);
+    const acc = String(req.params.accent).match(/^[0-9a-f]{6}$/i);
+    if (!id || !pt || !acc) return res.status(400).end();
+    try {
+      const buf = await cachedBanner(`r:${id}:${pt[0]}:${acc[0]}`, async () => {
+        const media = await getMediaLite(id).catch(() => null);
+        const coverUrl = hdCover(media?.coverImage?.extraLarge || media?.coverImage?.large);
+        return paintRing({ coverUrl, progress: Number(pt[1]), total: Number(pt[2]), accent: parseInt(acc[0], 16) });
+      });
+      sendImage(res, buf, 'png');
+    } catch (e) {
+      console.error('Ring image failed:', e.message);
+      res.status(500).end();
+    }
+  });
+
   return router;
 }
 
 module.exports = {
+  hdCover,
+  headerUrlFor,
+  ringUrl,
+  normalizeImageUrl,
+  paintProfileHeader,
+  paintRing,
   THEMES,
   DEFAULT_THEME,
   paletteFor,

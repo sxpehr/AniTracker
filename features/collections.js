@@ -1,9 +1,9 @@
 const { ModalBuilder, TextInputBuilder, TextInputStyle, LabelBuilder, StringSelectMenuBuilder } = require('discord.js');
 const ui = require('./ui');
 const social = require('./social');
-const { paletteFor } = require('./themes');
+const { paletteFor, ringUrl, hdCover } = require('./themes');
 const { ctx } = require('./ctx');
-const { snapshot, getProfileSnapshot, titleOf, getMediaLite } = require('./anilistSocial');
+const { snapshot, getProfileSnapshot, getMediaLite } = require('./anilistSocial');
 const picker = require('./picker');
 
 /* ---------------------------------------------------------------------------
@@ -94,7 +94,7 @@ function collectionBlocks(u, key, { ownerId, page = 0, manage = false, pagerPref
         )
       );
     }
-    const controls = [ui.button(`c:add:${key}`, 'Add anime', { emoji: '➕', style: ui.ButtonStyle.Primary })];
+    const controls = [ui.button(`c:add:${key}`, 'Add anime', { emoji: '📥', style: ui.ButtonStyle.Primary })];
     if (!['favorites', 'watchlist', 'recommendations'].includes(key)) {
       controls.push(ui.button(`c:edit:${key}`, 'Edit details', { emoji: '✏️' }), ui.button(`c:del:${key}`, 'Delete', { emoji: '🗑️', style: ui.ButtonStyle.Danger }));
     }
@@ -133,34 +133,61 @@ async function rotationEntries(u, anilistId) {
   return { all, current };
 }
 
-function rotationLine(e) {
-  const title = `**[${ui.esc(ui.clip(e.title, 48))}](${e.siteUrl})**`;
-  const pin = e.pinned ? '📌 ' : '';
-  if (e.progress === null) return `${pin}${title}\n-# added by hand`;
-  if (e.total) return `${pin}${title}\n${ui.bar(e.progress, e.total, 12)}  \`${e.progress}/${e.total}\``;
-  const next = e.next ? ` · ep ${e.next.episode} ${ui.relTime(e.next.airingAt * 1000)}` : '';
-  return `${pin}${title}\n-# on episode ${e.progress}${next}`;
+// One row per show: title + episode count beside a progress ring (the
+// cover inside a ring that fills in your theme colour). Hand-added shows
+// without AniList progress get their plain cover instead.
+function rotationRows(entries, accent) {
+  return entries.map((e) => {
+    const title = `${e.pinned ? '📌 ' : ''}**[${ui.esc(ui.clip(e.title, 60))}](${e.siteUrl})**`;
+    let sub;
+    let thumb = hdCover(e.cover);
+    if (e.progress === null) sub = '-# Added by hand';
+    else {
+      const aired = e.next ? e.next.episode - 1 : null;
+      const total = e.total || aired || 0;
+      if (e.total) sub = `-# **${e.progress}** / ${e.total} episodes  ·  ${Math.round((e.progress / e.total) * 100)}%`;
+      else sub = `-# **${e.progress}** episode${e.progress === 1 ? '' : 's'} in${e.next ? `  ·  ep ${e.next.episode} ${ui.relTime(e.next.airingAt * 1000)}` : ''}`;
+      thumb = ringUrl(e.mediaId, e.progress, total, accent) || thumb;
+    }
+    return ui.row([title, sub], thumb);
+  });
 }
 
-async function rotationBlocks(u, anilistId, { manage = false, limit = 8 } = {}) {
-  const { all, current } = await rotationEntries(u, anilistId);
+async function rotationBlocks(u, anilistId, { manage = false, limit = 6 } = {}) {
+  const { all } = await rotationEntries(u, anilistId);
+  const accent = manage ? ui.ANILIST_BLUE : paletteFor(u.profile).accent;
   const blocks = [ui.text(`### 🔄 In Rotation  ·  ${all.length}\n-# What’s being watched right now — progress syncs from AniList`)];
-  if (!anilistId && !all.length) blocks.push(ui.text('*Link an AniList account with `/signin` to fill this automatically.*'));
+  if (!anilistId && !all.length) blocks.push(ui.text('*Link an AniList account with `/signin` to fill this automatically, or add shows by hand.*'));
   else if (!all.length) blocks.push(ui.text('*Nothing in rotation right now.*'));
   else {
-    const top = all.slice(0, limit);
-    const g = ui.coverGallery(top.slice(0, 4).map((e) => ({ url: e.cover, description: e.title })));
-    if (g) blocks.push(g);
-    blocks.push(ui.text(top.map(rotationLine).join('\n')));
+    blocks.push(...rotationRows(all.slice(0, limit), accent));
+    if (all.length > limit) blocks.push(ui.text(`-# +${all.length - limit} more`));
   }
   if (manage) {
     const options = all.slice(0, 25).map((e) => ({ label: ui.clip(e.title, 100), value: String(e.mediaId), default: e.pinned }));
-    if (options.length) blocks.push(ui.select('c:rot:pin', '📌 Pin shows to the top (pick any)', options, { min: 0, max: options.length }));
-    const hideOpts = [...current.map((e) => e.media), ...(u.rotation.extra || []).map((x) => ({ id: x.mediaId, title: { english: x.title } }))]
-      .slice(0, 25)
-      .map((m) => ({ label: ui.clip(titleOf(m), 100), value: String(m.id), default: (u.rotation.hidden || []).includes(m.id) }));
-    if (hideOpts.length) blocks.push(ui.select('c:rot:hide', '🙈 Hide shows from your profile (pick any)', hideOpts, { min: 0, max: hideOpts.length }));
-    blocks.push(ui.actionRow(ui.button('c:rot:add', 'Add a show by hand', { emoji: '➕', style: ui.ButtonStyle.Primary }), ui.button('c:home', 'All lists', { emoji: '🗂️' })));
+    if (options.length) {
+      blocks.push(ui.select('c:rot:pin', '📌 Pin shows to the top (pick any)', options, { min: 0, max: options.length }));
+      blocks.push(
+        ui.select(
+          'c:rot:rm',
+          '➖ Remove from rotation…',
+          all.slice(0, 25).map((e) => ({ label: ui.clip(e.title, 100), value: String(e.mediaId), description: e.manual ? 'Added by hand' : 'From your AniList — hidden here, AniList is untouched' })),
+          { min: 1, max: Math.min(25, all.length) }
+        )
+      );
+    }
+    const hidden = (u.rotation.hidden || []).slice(0, 25);
+    if (hidden.length) {
+      blocks.push(
+        ui.select(
+          'c:rot:restore',
+          '↩️ Bring back a hidden show…',
+          hidden.map((id) => ({ label: ui.clip(u.rotation.hiddenTitles?.[id] || `AniList #${id}`, 100), value: String(id) })),
+          { min: 1, max: hidden.length }
+        )
+      );
+    }
+    blocks.push(ui.actionRow(ui.button('c:rot:add', 'Add a show', { emoji: '📥', style: ui.ButtonStyle.Primary }), ui.button('c:home', 'All lists', { emoji: '🗂️' })));
   }
   return blocks;
 }
@@ -316,6 +343,28 @@ function noteModal(key, mediaId, existing) {
     .setCustomId(`c:m:note:${key}:${mediaId}`)
     .setTitle(isRec ? 'Recommendation message' : 'Add a note')
     .addLabelComponents(new LabelBuilder().setLabel(isRec ? 'Message' : 'Note').setDescription('Leave empty to remove it').setTextInputComponent(input));
+}
+
+/* ------------------------------ rotation edits ------------------------------ */
+
+async function rotationTitles(u, userId) {
+  const core = await ctx.loadData();
+  const { all } = await rotationEntries(u, social.anilistFor(core, userId)?.id);
+  return Object.fromEntries(all.map((e) => [e.mediaId, e.title]));
+}
+
+// Hand-added shows are deleted; AniList ones are hidden from AniTracker only.
+function removeFromRotation(u, ids, titles = {}) {
+  const removed = [];
+  for (const id of ids) {
+    const before = u.rotation.extra.length;
+    u.rotation.extra = u.rotation.extra.filter((x) => x.mediaId !== id);
+    if (u.rotation.extra.length === before && !u.rotation.hidden.includes(id)) u.rotation.hidden.push(id);
+    u.rotation.pinned = u.rotation.pinned.filter((x) => x !== id);
+    u.rotation.hiddenTitles = { ...(u.rotation.hiddenTitles || {}), ...(titles[id] ? { [id]: titles[id] } : {}) };
+    removed.push(titles[id] || `#${id}`);
+  }
+  return removed;
 }
 
 /* -------------------------------- handlers -------------------------------- */
@@ -486,7 +535,12 @@ async function onComponent(interaction) {
   if (action === 'rot') {
     const sub = parts[2];
     if (sub === 'pin') u.rotation.pinned = interaction.values.map(Number);
-    if (sub === 'hide') u.rotation.hidden = interaction.values.map(Number);
+    if (sub === 'hide') u.rotation.hidden = interaction.values.map(Number); // older messages
+    if (sub === 'rm') removeFromRotation(u, interaction.values.map(Number), await rotationTitles(u, me));
+    if (sub === 'restore') {
+      const back = new Set(interaction.values.map(Number));
+      u.rotation.hidden = (u.rotation.hidden || []).filter((id) => !back.has(id));
+    }
     if (sub === 'add') return picker.openSearch(interaction, 'rot', '-', { title: 'Add to In Rotation' });
     await ctx.saveSocial();
     return update(interaction, await viewPayload({ ownerId: me, viewerId: me, key: 'rotation', manage: true }));
@@ -585,4 +639,7 @@ module.exports = {
   onModal,
   privacyPartFor,
   collectionModal,
+  rotationRows,
+  removeFromRotation,
+  rotationTitles,
 };

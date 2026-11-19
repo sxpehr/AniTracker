@@ -55,6 +55,7 @@ const collectionsFeature = require('./features/collections');
 const reviewsFeature = require('./features/reviews');
 const statsUi = require('./features/statsUi');
 const picker = require('./features/picker');
+const animeFeature = require('./features/anime');
 const { snapshot: mediaSnapshot } = require('./features/anilistSocial');
 
 const POLL_INTERVAL_MS = (parseInt(process.env.POLL_MINUTES, 10) || 3) * 60 * 1000;
@@ -148,6 +149,8 @@ setupFeatures({
   setLiveActivity: (data, account, on, by) => setLiveActivity(data, account, on, by),
   applyRecommendVote: (...args) => applyRecommendVote(...args),
   buildActivityPreview: (...args) => buildActivityPreview(...args),
+  buildMoreInfoPayload: (id) => buildMoreInfoPayload(id),
+  toggleList: (interaction, mediaId, field) => handleListToggleButton(interaction, mediaId, field),
 });
 
 client.on(Events.Error, (err) => console.error('[discord client error]', err.message));
@@ -526,6 +529,8 @@ async function routeFeatureInteraction(interaction) {
     case 'rc':
     case 'lb':
       return statsUi.onComponent(interaction);
+    case 'a':
+      return animeFeature.onComponent(interaction);
     case 'q':
     case 'qs':
     case 'qx':
@@ -1132,7 +1137,9 @@ async function handleHelp(interaction) {
       {
         name: '📚 Lists & reviews',
         value: [
-          '`/myfavorites` · `/watchlater` · `/collection` — your lists',
+          '`/anime info · search · trending · random · airing` — look anything up',
+          '`/watchlater` · `/myfavorites` · `/rotation` — view, add, remove',
+          '`/collection` — custom lists like “Comfort Anime”',
           '`/recommend` — recommend an anime with a message',
           '`/review write` · `/review browse` — write and discover reviews',
           '`/favorites` — anyone’s AniList favourites',
@@ -1145,7 +1152,7 @@ async function handleHelp(interaction) {
       { name: '💬 Other', value: '`/feedback` — rate AniTracker & tell the developer anything\n`/update` — post an update notice silently *(Manage Server)*' },
       {
         name: '🔘 Buttons on activity posts',
-        value: '💜 Recommend · ❤️ Like · ⭐ Favorite · 📌 Watch later\n✍️ Review · ➕ Save to list · 📊 More info — replies only you can see\nReact to a post and its owner gets a private DM.',
+        value: '💜 Recommend · 🤍 Like · ⭐ Favorite · 📌 Watch later\n✍️ Review · 🗂️ Save to list · 📊 More info — replies only you can see\nReact to a post and its owner gets a private DM.',
       }
     );
   const invite = getInviteUrl();
@@ -1311,7 +1318,7 @@ async function handleListToggleButton(interaction, mediaId, field) {
     await respond(
       interaction,
       confirmCard(media || fallback, isWatch ? '📌 REMOVED FROM WATCH LATER' : '⭐ REMOVED FROM FAVORITES', `-# ${list.length} left`, [
-        ui.button(`col_${mediaId}`, 'Save to other lists', { emoji: '➕' }),
+        ui.button(`col_${mediaId}`, 'Save to other lists', { emoji: '🗂️' }),
       ])
     );
     return;
@@ -1331,7 +1338,7 @@ async function handleListToggleButton(interaction, mediaId, field) {
     interaction,
     confirmCard(media, isWatch ? '📌 ADDED TO WATCH LATER' : '⭐ ADDED TO FAVORITES', `-# #${list.length} on your list · tap the button again on the post to remove`, [
       ui.button(`c:v:me:${field}:1:${Math.floor((list.length - 1) / collectionsFeature.PAGE)}`, isWatch ? 'Open Watch Later' : 'Open Favorites', { emoji: isWatch ? '📌' : '⭐' }),
-      ui.button(`col_${mediaId}`, 'More lists', { emoji: '➕' }),
+      ui.button(`col_${mediaId}`, 'More lists', { emoji: '🗂️' }),
     ])
   );
 }
@@ -1498,17 +1505,15 @@ async function getFranchiseSeasonIds(rootId) {
   return ids;
 }
 
-async function handleMoreInfoButton(interaction, mediaId) {
+// The "More Info" panel for any anime (used by the post button and /anime).
+async function buildMoreInfoPayload(mediaId) {
   let media;
   try {
     media = await getMediaDetailsCached(mediaId);
   } catch (e) {
     console.error('More Info lookup failed:', e.message);
   }
-  if (!media) {
-    await respond(interaction, { content: '⚠️ AniList isn’t responding right now (this is on AniList’s side). Try again in a bit.' });
-    return;
-  }
+  if (!media) return null;
 
   let seasonNumber = null;
   let totalSeasons = null;
@@ -1525,8 +1530,16 @@ async function handleMoreInfoButton(interaction, mediaId) {
       console.error('Season count failed:', e.message);
     }
   }
+  return buildMoreInfo(media, { seasonNumber, totalSeasons });
+}
 
-  await respond(interaction, buildMoreInfo(media, { seasonNumber, totalSeasons }));
+async function handleMoreInfoButton(interaction, mediaId) {
+  const payload = await buildMoreInfoPayload(mediaId);
+  if (!payload) {
+    await respond(interaction, { content: '⚠️ AniList isn’t responding right now (this is on AniList’s side). Try again in a bit.' });
+    return;
+  }
+  await respond(interaction, payload);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1534,7 +1547,7 @@ async function handleMoreInfoButton(interaction, mediaId) {
  * ------------------------------------------------------------------------- */
 // Two rows under every activity post:
 //   💜 Recommend · ❤️ Like · ⭐ Favorite · 📌 Watch later
-//   ✍️ Review · ➕ Save to list · 📊 More info
+//   ✍️ Review · 🗂️ Save to list · 📊 More info
 function buildActivityButtons(rootId, infoMediaId, recommendCount = 0, likeCount = 0) {
   const target = infoMediaId || rootId;
   return [
@@ -1547,14 +1560,14 @@ function buildActivityButtons(rootId, infoMediaId, recommendCount = 0, likeCount
       new ButtonBuilder()
         .setCustomId(`like_${rootId}`)
         .setLabel(likeCount ? `Like · ${likeCount}` : 'Like')
-        .setEmoji('❤️')
+        .setEmoji('🤍')
         .setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId(`fav_${rootId}`).setLabel('Favorite').setEmoji('⭐').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`wl_${rootId}`).setLabel('Watch later').setEmoji('📌').setStyle(ButtonStyle.Secondary)
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`rvw_${target}`).setLabel('Review').setEmoji('✍️').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`col_${rootId}`).setLabel('Save to list').setEmoji('➕').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`col_${rootId}`).setLabel('Save to list').setEmoji('🗂️').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`info_${target}`).setLabel('More info').setEmoji('📊').setStyle(ButtonStyle.Secondary)
     ),
   ];
@@ -1736,7 +1749,7 @@ async function buildEmbed(username, avatarUrl, activity, streak, seasonInfo, loo
     embed.setColor(color).setFooter({ text: buildFooterText(0) });
     if (show.has('cover') && displayImage) {
       if (style === 'full') embed.setImage(displayImage);
-      else embed.setThumbnail(cover.large || displayImage);
+      else embed.setThumbnail(displayImage);
     }
   } else if (activity.__typename === 'TextActivity') {
     embed

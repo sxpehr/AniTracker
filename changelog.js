@@ -9,7 +9,9 @@ const LATEST_UPDATE = {
     '**🗂️ Collections** — Favorites, Watch Later, In Rotation and your own lists like “Comfort Anime”',
     '**📊 /stats & 🎁 /recap** — monthly + lifetime stats, watching streaks with a heatmap, and a shareable monthly recap',
     '**🏆 /leaderboard** — friendly server boards (server managers choose which ones)',
-    '**🔘 New post buttons** — ❤️ Like, ✍️ Review and ➕ Save to list, plus your own post style in /settings',
+    '**🔎 /anime** — info, search, trending, random and what’s airing next, with one-tap Watch later / Favorite / Rotation',
+    '**📌 /watchlater · ⭐ /myfavorites · 🔄 /rotation** — view, add and remove straight from a command',
+    '**🔘 New post buttons** — 🤍 Like, ✍️ Review and 🗂️ Save to list, plus your own post style in /settings',
   ],
   footer: 'Try /profile — then make it yours with /settings',
 };

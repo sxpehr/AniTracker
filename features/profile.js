@@ -4,9 +4,9 @@ const engine = require('./statsEngine');
 const collections = require('./collections');
 const reviews = require('./reviews');
 const statsUi = require('./statsUi');
-const { paletteFor, bannerUrlFor } = require('./themes');
+const { paletteFor, bannerUrlFor, headerUrlFor, hdCover } = require('./themes');
+const { getMediaLite, getProfileSnapshot } = require('./anilistSocial');
 const { ctx } = require('./ctx');
-const { getProfileSnapshot } = require('./anilistSocial');
 const { getRecentActivities } = require('../anilist');
 
 /* ---------------------------------------------------------------------------
@@ -29,7 +29,7 @@ const { getRecentActivities } = require('../anilist');
  * ------------------------------------------------------------------------- */
 
 const TABS = {
-  overview: { label: 'Overview', emoji: '🪪' },
+  overview: { label: 'Overview', emoji: '🏠' },
   favorites: { label: 'Favorites', emoji: '⭐' },
   reviews: { label: 'Reviews', emoji: '✍️' },
   recs: { label: 'Recs', emoji: '💜' },
@@ -38,12 +38,14 @@ const TABS = {
   activity: { label: 'Activity', emoji: '📡' },
 };
 
-function navRows(ownerId, tab, { own, anilistUrl }) {
+// One consistent nav block: same emoji style and label length everywhere,
+// the current tab in the accent (blurple), the rest neutral. Customizing
+// lives in /settings, not here.
+function navRows(ownerId, tab, { anilistUrl }) {
   const b = (t) =>
     ui.button(`p:t:${ownerId}:${t}:0:n`, TABS[t].label, { emoji: TABS[t].emoji, style: t === tab ? ui.ButtonStyle.Primary : ui.ButtonStyle.Secondary });
   const row2 = [b('collections'), b('stats'), b('activity')];
-  if (own) row2.push(ui.button('s:open', 'Customize', { emoji: '🎨', style: ui.ButtonStyle.Success }));
-  else if (anilistUrl) row2.push(ui.linkButton(anilistUrl, 'AniList', '🔗'));
+  if (anilistUrl) row2.push(ui.linkButton(anilistUrl, 'AniList', '🔗'));
   return [ui.actionRow(b('overview'), b('favorites'), b('reviews'), b('recs')), ui.actionRow(row2)];
 }
 
@@ -55,13 +57,22 @@ async function discordUser(id) {
   }
 }
 
-function header(u, user, al, pal) {
+// Identity block: big name, the tagline right under it as a quote, then the
+// quiet details. When the avatar is already painted into the header image
+// (overlapping the banner) it isn't repeated here.
+function identityLines(u, user, al, pal) {
   const name = u.profile.displayName || user?.globalName || user?.username || 'Unknown';
-  const handle = user?.username ? `@${user.username}` : '';
-  const sub = [handle, al ? `[AniList](${al.siteUrl})` : null, `${pal.name} theme`].filter(Boolean).join('  ·  ');
-  const lines = [`## ${ui.esc(name)}`, `-# ${sub}`];
-  if (u.profile.tagline) lines.push(`*${ui.softEsc(u.profile.tagline)}*`);
-  return ui.row(lines, user?.displayAvatarURL?.({ size: 256, extension: 'png' }));
+  const meta = [user?.username ? `@${user.username}` : null, al ? `[AniList ↗](${al.siteUrl})` : null, `${pal.name} theme`].filter(Boolean).join('  ·  ');
+  const lines = [`# ${ui.esc(name)}`];
+  if (u.profile.tagline) lines.push(`*“${ui.softEsc(u.profile.tagline)}”*`);
+  lines.push(`-# ${meta}`);
+  return lines;
+}
+
+function header(u, user, al, pal, { avatarInImage = false } = {}) {
+  const lines = identityLines(u, user, al, pal);
+  if (avatarInImage) return ui.text(lines.join('\n'));
+  return ui.row(lines, user?.displayAvatarURL?.({ size: 512, extension: 'png' }));
 }
 
 /* ----------------------------- overview parts ----------------------------- */
@@ -88,13 +99,22 @@ const parts = {
     return [statsStrip(d)];
   },
 
-  featured: ({ u }) => {
+  // Featured anime: its banner, then cover art beside a prominent title.
+  featured: ({ u, featuredBanner }) => {
     const f = u.profile.featured;
     if (!f) return [];
-    const meta = [f.year, f.format && f.format.replace('_', ' '), f.episodes ? `${f.episodes} episodes` : null].filter(Boolean).join(' · ');
-    const lines = [ui.label('Featured'), `### [${ui.esc(ui.clip(f.title, 80))}](${f.siteUrl})`];
-    lines.push([meta ? `-# ${meta}` : null, f.note ? `> ${ui.softEsc(ui.clip(f.note, 200))}` : null].filter(Boolean).join('\n') || '-# ✦');
-    return [ui.row(lines, f.cover)];
+    const meta = [f.year, f.format && f.format.replace('_', ' '), f.episodes ? `${f.episodes} episodes` : null].filter(Boolean).join('  ·  ');
+    const out = [ui.text(ui.label('✦ Featured'))];
+    // skip the banner here if the whole profile header already uses it
+    if (featuredBanner && u.profile.bannerMode !== 'featured') {
+      const g = ui.gallery([{ url: featuredBanner, description: `${f.title} banner` }]);
+      if (g) out.push(g);
+    }
+    const lines = [`## [${ui.esc(ui.clip(f.title, 70))}](${f.siteUrl})`];
+    if (meta) lines.push(`-# ${meta}`);
+    if (f.note) lines.push(`> ${ui.softEsc(ui.clip(f.note, 200))}`);
+    out.push(ui.row(lines.slice(0, 3), hdCover(f.cover)));
+    return out;
   },
 
   favorites: ({ u }) => {
@@ -107,16 +127,9 @@ const parts = {
     return out;
   },
 
-  rotation: ({ rotation }) => {
+  rotation: ({ rotation, pal }) => {
     if (!rotation?.length) return [];
-    const top = rotation.slice(0, 3);
-    const lines = top.map((e) => {
-      const title = `**[${ui.esc(ui.clip(e.title, 40))}](${e.siteUrl})**`;
-      if (e.progress === null) return `${e.pinned ? '📌 ' : ''}${title}`;
-      if (e.total) return `${e.pinned ? '📌 ' : ''}${title}\n${ui.bar(e.progress, e.total, 12)}  \`${e.progress}/${e.total}\``;
-      return `${e.pinned ? '📌 ' : ''}${title}\n-# episode ${e.progress}${e.next ? ` · ep ${e.next.episode} ${ui.relTime(e.next.airingAt * 1000)}` : ''}`;
-    });
-    return [ui.text(`${ui.label(`In Rotation · ${rotation.length}`)}\n${lines.join('\n')}`)];
+    return [ui.text(ui.label(`In Rotation · ${rotation.length}`)), ...collections.rotationRows(rotation.slice(0, 2), pal.accent)];
   },
 
   opening: ({ u }) => {
@@ -170,9 +183,11 @@ async function overviewBlocks(d) {
   const order = (social.LAYOUTS[u.profile.layout] || social.LAYOUTS.classic).order;
   const enabled = new Set(u.profile.sections);
   const blocks = [];
+  // Stats live right under the name (if shown at all), not in the section flow.
+  if (enabled.has('stats')) blocks.push(...parts.stats(d).filter(Boolean));
   let i = 0;
   for (const key of order) {
-    if (!enabled.has(key)) continue;
+    if (key === 'stats' || !enabled.has(key)) continue;
     const comps = parts[key](d).filter(Boolean);
     if (!comps.length) continue;
     // Each section is one unit: if Discord's 40-component limit is hit, whole
@@ -186,12 +201,7 @@ async function overviewBlocks(d) {
   }
   if (own && !social.isCustomized(u)) {
     blocks.push(ui.divider());
-    blocks.push(
-      ui.section(
-        ['### ✨ Make this profile yours', '-# Pick a theme and banner, feature an anime, set your favorite opening and choose what shows here. Takes a minute.'],
-        ui.button('s:open:cta', 'Start', { emoji: '🎨', style: ui.ButtonStyle.Primary })
-      )
-    );
+    blocks.push(ui.text('### ✨ Make this profile yours\n-# Run **/settings** to pick a theme and banner, feature an anime, set your favorite opening and choose what shows here.'));
   } else if (!blocks.length) {
     blocks.push(ui.text(own ? '*Your profile is empty — add favorites, a featured anime or a bio in `/settings`.*' : '*Nothing to show here yet.*'));
   }
@@ -333,23 +343,33 @@ async function renderProfile({ ownerId, viewerId, tab = 'overview', page = 0, us
   } else if (tab === 'overview' && u.profile.sections.includes('rotation')) {
     rotation = (await collections.rotationEntries(u, null).catch(() => ({ all: [] }))).all;
   }
+  // Featured anime banner (older saves don't have it stored — look it up).
+  let featuredBanner = null;
+  const f = u.profile.featured;
+  if (tab === 'overview' && f && u.profile.sections.includes('featured')) {
+    featuredBanner = f.banner || (await getMediaLite(f.mediaId).catch(() => null))?.bannerImage || null;
+  }
   const su = al ? st.users[String(al.id)] : null;
-  const d = { core, s, st, u, own, ownerId, viewerId, pal, user, al, snap, su, tz: u.prefs.timezone || social.DEFAULT_TZ, rotation };
+  const d = { core, s, st, u, own, ownerId, viewerId, pal, user, al, snap, su, tz: u.prefs.timezone || social.DEFAULT_TZ, rotation, featuredBanner };
 
   const children = [];
   if (notice) children.push(ui.text(notice));
   if (tab === 'overview') {
-    const banner = previewBanner !== null ? previewBanner : bannerUrlFor(u.profile);
+    // Painted / featured banners come back as one image with the avatar
+    // overlapping the banner's bottom edge. Custom images (incl. GIFs) are
+    // shown untouched, with the avatar beside the name instead.
+    const headerImg = previewBanner === null ? headerUrlFor(u.profile, user) : null;
+    const banner = headerImg || (previewBanner !== null ? previewBanner : bannerUrlFor(u.profile));
     const g = banner ? ui.gallery([{ url: banner, description: 'Profile banner' }]) : null;
     if (g) children.push(g);
-    children.push(header(u, user, al, pal));
+    children.push(header(u, user, al, pal, { avatarInImage: Boolean(headerImg && g) }));
     children.push(...(await overviewBlocks(d)));
   } else {
     children.push(ui.text(`-# ${ui.esc(u.profile.displayName || user?.globalName || user?.username || 'Profile')}  ›  ${TABS[tab]?.label.toUpperCase() || ''}`));
     children.push(...(await tabBlocks(tab, d, page)));
   }
   children.push(ui.divider());
-  children.push(...navRows(ownerId, tab, { own, anilistUrl: al?.siteUrl }));
+  children.push(...navRows(ownerId, tab, { anilistUrl: al?.siteUrl }));
   return ui.fit([ui.card(pal.accent, children)]);
 }
 

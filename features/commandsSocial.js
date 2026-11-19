@@ -8,6 +8,7 @@ const settings = require('./settings');
 const collections = require('./collections');
 const reviews = require('./reviews');
 const statsUi = require('./statsUi');
+const anime = require('./anime');
 
 /* Slash commands for the profile / collections / reviews / stats features,
    plus autocomplete for anime names, collections and months. */
@@ -33,7 +34,10 @@ async function autocomplete(interaction) {
   const value = String(focused.value || '');
   let choices = [];
   try {
-    if (focused.name === 'anime') {
+    const sub = interaction.options.getSubcommand(false);
+    if (focused.name === 'anime' && sub === 'remove' && ['watchlater', 'myfavorites', 'rotation'].includes(interaction.commandName)) {
+      choices = await anime.listSuggestions(interaction, value);
+    } else if (focused.name === 'anime') {
       if (value.trim().length >= 2) {
         const results = await withTimeout(searchAnime(value, 10), 2500, []);
         choices = results.map((m) => {
@@ -97,10 +101,8 @@ async function handle(interaction) {
   if (name === 'profile') return profile.handleCommand(interaction);
   if (name === 'settings') return settings.handleCommand(interaction);
 
-  if (name === 'watchlater' || name === 'myfavorites') {
-    const key = name === 'watchlater' ? 'watchlist' : 'favorites';
-    return ctx.respond(interaction, { ...(await collections.viewPayload({ ownerId: me, viewerId: me, key, manage: true })), flags: ui.V2 | ui.EPHEMERAL });
-  }
+  if (name === 'watchlater' || name === 'myfavorites' || name === 'rotation') return anime.handleListCommand(interaction);
+  if (name === 'anime') return anime.handleCommand(interaction);
 
   if (name === 'collection') {
     const sub = interaction.options.getSubcommand();
@@ -209,6 +211,6 @@ async function handle(interaction) {
   }
 }
 
-const HANDLED = new Set(['profile', 'settings', 'watchlater', 'myfavorites', 'collection', 'recommend', 'review', 'stats', 'recap', 'leaderboard']);
+const HANDLED = new Set(['anime', 'rotation', 'profile', 'settings', 'watchlater', 'myfavorites', 'collection', 'recommend', 'review', 'stats', 'recap', 'leaderboard']);
 
 module.exports = { handle, autocomplete, HANDLED };

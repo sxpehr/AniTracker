@@ -100,7 +100,7 @@ function reviewCard(r, author, { mode = 'reader', backId, notice } = {}) {
       `-# by <@${r.authorId}> · ${ui.shortDate(r.createdAt)}${r.editedAt ? ` · edited ${ui.relTime(r.editedAt)}` : ''}${likes ? ` · ❤️ ${likes} found this helpful` : ''}`
     ),
   ];
-  const buttons = [ui.button(`rv:like:${r.id}:${mode === 'public' ? 'p' : 'e'}`, likes ? `Helpful · ${likes}` : 'Helpful', { emoji: '❤️', style: ui.ButtonStyle.Danger })];
+  const buttons = [ui.button(`rv:like:${r.id}:${mode === 'public' ? 'p' : 'e'}`, likes ? `Helpful · ${likes}` : 'Helpful', { emoji: '🤍', style: ui.ButtonStyle.Danger })];
   buttons.push(ui.button(`rv:b:recent:0:${r.mediaId}`, 'More on this anime', { emoji: '📖' }));
   if (r.siteUrl) buttons.push(ui.linkButton(r.siteUrl, 'AniList', '🔗'));
   children.push(ui.actionRow(buttons));
@@ -201,6 +201,30 @@ function browsePayload(s, { sort = 'recent', page = 0, viewerId, guildId, mediaI
   return ui.fit([ui.card(ui.ANILIST_BLUE, children)]);
 }
 
+/* ----------------------------- shared copies ----------------------------- */
+
+// Every time a review is shared in a channel we remember that message, so
+// edits, new helpful votes and deletions show up on the shared copies too.
+async function syncShares(r, author, { remove = false, skipMessageId = null } = {}) {
+  const shares = r.shares || [];
+  const keep = [];
+  for (const sh of shares) {
+    try {
+      const channel = await ctx.client.channels.fetch(sh.channelId);
+      const msg = await channel.messages.fetch(sh.messageId);
+      if (remove) await msg.delete();
+      else {
+        if (sh.messageId !== skipMessageId) await msg.edit(reviewCard(r, author, { mode: 'public' }));
+        keep.push(sh);
+      }
+    } catch (e) {
+      // message/channel gone or no access — forget it
+      if (!remove && !/Unknown Message|Unknown Channel|Missing Access/i.test(e.message)) keep.push(sh);
+    }
+  }
+  r.shares = keep;
+}
+
 /* -------------------------------- actions -------------------------------- */
 
 async function openWriteForm(interaction, mediaId, knownTitle) {
@@ -278,6 +302,7 @@ async function onModal(interaction) {
     s.reviews[r.id] = r;
     if (!u.profile.sections.includes('review')) u.profile.sections.push('review');
   }
+  if (r.editedAt && r.shares?.length) await syncShares(r, u);
   await ctx.saveSocial();
   return reply(interaction, reviewCard(r, u, { mode: 'author', notice: `✅ **Review ${r.editedAt ? 'updated' : 'published'}!** It’s on your profile now — tap **Share here** to post it in this channel.` }));
 }
@@ -320,6 +345,7 @@ async function onComponent(interaction) {
     social.markGuild(social.getUser(s, me), interaction.guildId);
     await ctx.saveSocial();
     const mode = parts[3] === 'p' ? 'public' : r.authorId === me ? 'author' : 'reader';
+    if (r.shares?.length) syncShares(r, social.peekUser(s, r.authorId), { skipMessageId: interaction.message?.id }).catch(() => {});
     // On a public card, refresh the count for everyone; elsewhere refresh the private view.
     return update(interaction, reviewCard(r, social.peekUser(s, r.authorId), { mode }));
   }
@@ -336,8 +362,16 @@ async function onComponent(interaction) {
   }
   if (action === 'share') {
     try {
-      await interaction.channel.send(reviewCard(r, author, { mode: 'public' }));
-      return reply(interaction, { content: '📣 Shared in this channel.' });
+      // One shared copy per channel: replace an older copy here instead of stacking duplicates.
+      const old = (r.shares || []).filter((sh) => sh.channelId === interaction.channelId);
+      if (old.length) {
+        await syncShares({ ...r, shares: old }, author, { remove: true });
+        r.shares = (r.shares || []).filter((sh) => sh.channelId !== interaction.channelId);
+      }
+      const sent = await interaction.channel.send(reviewCard(r, author, { mode: 'public' }));
+      r.shares = [...(r.shares || []), { channelId: sent.channelId, messageId: sent.id }];
+      await ctx.saveSocial();
+      return reply(interaction, { content: '📣 Shared in this channel — it’ll update automatically if you edit or delete the review.' });
     } catch (e) {
       return reply(interaction, { content: `Couldn’t post here: ${e.message}` });
     }
@@ -347,13 +381,14 @@ async function onComponent(interaction) {
       interaction,
       ui.fit([
         ui.card(ui.ANILIST_BLUE, [
-          ui.text(`### 🗑️ Delete your review of ${ui.esc(r.mediaTitle)}?\nThis removes it from your profile and from browsing. It can’t be undone.`),
+          ui.text(`### 🗑️ Delete your review of ${ui.esc(r.mediaTitle)}?\nThis removes it from your profile, from browsing, and from any channel you shared it in. It can’t be undone.`),
           ui.actionRow(ui.button(`rv:delok:${r.id}`, 'Delete review', { style: ui.ButtonStyle.Danger, emoji: '🗑️' }), ui.button(`rv:open:${r.id}`, 'Keep it', { emoji: '↩️' })),
         ]),
       ])
     );
   }
   if (action === 'delok') {
+    await syncShares(r, author, { remove: true }); // take shared copies down too
     delete s.reviews[r.id];
     if (author.profile.featuredReviewId === r.id) author.profile.featuredReviewId = null;
     await ctx.saveSocial();

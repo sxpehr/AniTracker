@@ -61,12 +61,12 @@ function buildFeedbackModal() {
 
   return new ModalBuilder()
     .setCustomId(MODAL_ID)
-    .setTitle('Send feedback to AniTracker')
+    .setTitle('Send feedback to TV Tracker')
     .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent('Thanks for helping make AniTracker better! Everything here goes straight to the developer.')
+      new TextDisplayBuilder().setContent('Thanks for helping make TV Tracker better! Everything here goes straight to the developer.')
     )
     .addLabelComponents(
-      new LabelBuilder().setLabel('Rating').setDescription('How would you rate AniTracker overall?').setStringSelectMenuComponent(rating),
+      new LabelBuilder().setLabel('Rating').setDescription('How would you rate TV Tracker overall?').setStringSelectMenuComponent(rating),
       new LabelBuilder().setLabel('Title').setDescription('A short summary').setTextInputComponent(title),
       new LabelBuilder().setLabel('Message').setTextInputComponent(message)
     );

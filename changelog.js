@@ -1,15 +1,15 @@
 // What `/update` posts when no custom message is given. Edit this list
 // whenever you ship something worth telling servers about.
 const LATEST_UPDATE = {
-  title: '✨ AniTracker update — November 2026',
+  title: '📺 TV Tracker update — movies & TV',
   items: [
-    '**ℹ️ More Info button** on every activity post — episodes, seasons, air dates, cast, plus Trailer / Watch / AniList / MAL links (only you see it)',
-    '**🔐 /signin** — link your AniList account so only *you* control your profile',
-    '**🟢 /tracking** — turn your live activity posts on or off everywhere',
-    '**💬 /feedback** — rate AniTracker and tell the developer anything',
-    '**📌 One Watch Later + Favorites list** that follows you across every server',
-    '**🔔 Nicer DM alerts** for reactions and recommends, with the anime cover and server',
-    '**🛠️ Stability** — far fewer restarts, and the bot no longer pings people when listing who’s tracked',
+    '**🎬 Movies and TV only.** Anime is left out. Watch posts show posters, years, ratings and progress',
+    '**🔐 /signin** — link your Simkl account with a short code (no website needed). Only you control your posts',
+    '**📡 /track** — pick a signed-in person; new watches post automatically, with no backfill of old history',
+    '**🔎 /find** — look up any movie or show and add it to your lists',
+    '**🟢 /tracking** — turn your live watch posts on or off everywhere',
+    '**📌 Watch later, favorites and a recommend leaderboard** that follow you across servers',
+    '**💬 /feedback** — rate TV Tracker and tell the developer anything',
   ],
   footer: 'Type /help to see every command',
 };

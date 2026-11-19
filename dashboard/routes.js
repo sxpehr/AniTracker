@@ -218,21 +218,19 @@ function buildDashboardRouter(client, deps) {
     '/users',
     wrap(async (req, res) => {
       const data = await loadData();
-      const linkedByAnilist = new Map(Object.entries(data.linkedAccounts).map(([discordId, a]) => [a.anilistId, discordId]));
-      const users = [];
+            const users = [];
       for (const [guildId, guildData] of Object.entries(data.guilds)) {
         const guild = client.guilds.cache.get(guildId);
         for (const u of guildData.users || []) {
           users.push({
             guildId,
             guildName: guild?.name || 'Unknown server',
-            username: u.username,
-            anilistId: u.id,
+            username: u.name,
+            discordId: u.discordId,
             avatar: u.avatar || null,
             addedBy: u.addedBy || null,
-            streak: u.streak || 0,
-            trackingOff: Boolean(data.trackingOptOut[String(u.id)]),
-            linked: linkedByAnilist.has(u.id),
+            trackingOff: Boolean(data.trackingOptOut[u.discordId]),
+            linked: Boolean(data.linkedAccounts[u.discordId]?.token),
           });
         }
       }
@@ -257,7 +255,7 @@ function buildDashboardRouter(client, deps) {
             guildId,
             guildName: guild?.name || 'Unknown server',
             messageId,
-            animeTitle: info.animeTitle || null,
+            title: info.title || null,
             cover: info.cover || null,
             addedBy: info.addedBy || null,
             postedAt: snowflakeToDate(messageId),
@@ -279,7 +277,7 @@ function buildDashboardRouter(client, deps) {
       const data = await loadData();
       const list = Object.entries(data.globalRecommendations || {})
         .filter(([, r]) => r.title && r.recommendedBy?.length)
-        .map(([mediaId, r]) => ({ mediaId, title: r.title, siteUrl: r.siteUrl, count: r.recommendedBy.length }))
+        .map(([key, r]) => ({ key, title: r.title, siteUrl: r.siteUrl, count: r.recommendedBy.length }))
         .sort((a, b) => b.count - a.count)
         .slice(0, 25);
       res.json({ list, note: 'Global — each person counts once per title, no matter how many servers they voted in.' });
@@ -291,10 +289,10 @@ function buildDashboardRouter(client, deps) {
     wrap(async (req, res) => {
       const data = await loadData();
       const list = Object.entries(data.watchStats || {})
-        .map(([mediaId, s]) => ({ mediaId, title: s.title, siteUrl: s.siteUrl, count: s.count }))
+        .map(([key, s]) => ({ key, title: s.title, siteUrl: s.siteUrl, count: s.count }))
         .sort((a, b) => b.count - a.count)
         .slice(0, 25);
-      res.json({ list, note: 'Counts every activity update posted for that title, across all servers.' });
+      res.json({ list, note: 'Counts watch posts for each title, across all servers. Starts fresh after the move to Simkl.' });
     })
   );
 
@@ -320,12 +318,12 @@ function buildDashboardRouter(client, deps) {
       const accounts = Object.entries(data.linkedAccounts || {}).map(([discordId, info]) => ({
         discordId,
         ...info,
-        trackingOff: Boolean(data.trackingOptOut[String(info.anilistId)]),
+        trackingOff: Boolean(data.trackingOptOut[discordId]),
       }));
       const names = await resolveUserNames(accounts.map((a) => a.discordId));
       for (const a of accounts) a.discordName = names[a.discordId] || null;
       accounts.sort((a, b) => new Date(b.linkedAt) - new Date(a.linkedAt));
-      res.json({ accounts, note: 'People who linked their AniList with /signin.' });
+      res.json({ accounts, note: 'People who linked their Simkl account with /signin.' });
     })
   );
 

@@ -218,7 +218,7 @@ async function renderOverview() {
     <div class="list-row">
       ${data.botAvatar ? `<img class="avatar" src="${data.botAvatar}" />` : ''}
       <div class="row-main">
-        <div class="row-title">${data.botTag || 'AniTracker'}</div>
+        <div class="row-title">${data.botTag || 'TV Tracker'}</div>
         <div class="row-sub">${data.botPaused ? 'Polling paused' : 'Polling every few minutes'} · ${data.memoryMB ?? '?'} MB RAM · storage ${
           data.storage?.healthy ? escapeHtml(data.storage.backend) : '<span class="text-danger">UNAVAILABLE (read-only)</span>'
         }</div>
@@ -362,7 +362,7 @@ function activityRow(a) {
     <div class="list-row">
       ${a.cover ? `<img class="avatar avatar-cover" src="${escapeHtml(a.cover)}" alt="" loading="lazy" />` : ''}
       <div class="row-main">
-        <div class="row-title">${escapeHtml(a.animeTitle || 'Activity update')}</div>
+        <div class="row-title">${escapeHtml(a.title || 'Activity update')}</div>
         <div class="row-sub">${escapeHtml(a.guildName)}${a.addedBy ? ` · tracked for ${escapeHtml(a.addedByName || a.addedBy)}` : ''}</div>
       </div>
       <div class="row-count">${timeAgo(a.postedAt)}</div>
@@ -435,13 +435,13 @@ async function renderLeaderboard(tab) {
     const { accounts, note } = await api('/leaderboards/linked');
     content.innerHTML = '';
     noteEl.textContent = note || '';
-    if (!accounts.length) return content.appendChild(el('<div class="empty-state">No one has linked their AniList with /signin yet.</div>'));
+    if (!accounts.length) return content.appendChild(el('<div class="empty-state">No one has linked their Simkl account with /signin yet.</div>'));
     for (const a of accounts) {
       content.appendChild(
         el(`<div class="list-row">
           ${a.avatar ? `<img class="avatar" src="${escapeHtml(a.avatar)}" alt="" />` : '<div class="avatar"></div>'}
           <div class="row-main">
-            <div class="row-title"><a href="${escapeHtml(a.siteUrl)}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">${escapeHtml(a.anilistName)}</a></div>
+            <div class="row-title"><a href="${escapeHtml(a.siteUrl)}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">${escapeHtml(a.name)}</a></div>
             <div class="row-sub">Discord: ${escapeHtml(a.discordName || a.discordId)} · linked ${timeAgo(a.linkedAt)}</div>
           </div>
           ${a.trackingOff ? '<span class="badge feedback-badge-disputed">Live activity off</span>' : '<span class="badge feedback-badge-resolved">Live activity on</span>'}

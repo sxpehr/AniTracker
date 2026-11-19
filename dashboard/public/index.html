@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta name="color-scheme" content="dark" />
-<title>AniTracker — Developer Portal</title>
+<title>TV Tracker — Developer Portal</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap" />
@@ -19,7 +19,7 @@
   <div class="login-card">
     <div class="brand">
       <span class="brand-mark">✦</span>
-      <span class="brand-name">AniTracker</span>
+      <span class="brand-name">TV Tracker</span>
     </div>
     <p class="login-sub">Developer Portal</p>
     <form id="login-form">
@@ -40,7 +40,7 @@
       </button>
       <div class="brand">
         <span class="brand-mark">✦</span>
-        <span class="brand-name">AniTracker</span>
+        <span class="brand-name">TV Tracker</span>
       </div>
     </div>
     <nav class="nav" aria-label="Primary">
@@ -108,8 +108,8 @@
           <label for="overview-send-channel">Channel</label>
           <select id="overview-send-channel"></select>
           <label for="overview-send-message">Message</label>
-          <textarea id="overview-send-message" rows="3" placeholder="Type what AniTracker should post…"></textarea>
-          <button id="overview-send-btn" class="btn btn-primary btn-block">Send as AniTracker</button>
+          <textarea id="overview-send-message" rows="3" placeholder="Type what TV Tracker should post…"></textarea>
+          <button id="overview-send-btn" class="btn btn-primary btn-block">Send as TV Tracker</button>
           <p id="overview-send-result" class="muted-note" role="status" aria-live="polite"></p>
         </div>
       </div>
@@ -126,7 +126,7 @@
     <!-- TRACKED USERS -->
     <section data-view-panel="users" class="view-panel" hidden>
       <div class="card">
-        <div class="card-header"><h2>Tracked AniList Users</h2><span id="users-count" class="badge"></span></div>
+        <div class="card-header"><h2>Tracked People</h2><span id="users-count" class="badge"></span></div>
         <div id="users-list" class="list"></div>
       </div>
     </section>
@@ -145,7 +145,7 @@
         <button class="tab active" data-tab="recommended">Most Recommended</button>
         <button class="tab" data-tab="watched">Most Watched</button>
         <button class="tab" data-tab="watchlater">Watch Later</button>
-        <button class="tab" data-tab="linked">Linked AniList Accounts</button>
+        <button class="tab" data-tab="linked">Linked Simkl Accounts</button>
       </div>
       <div class="card">
         <p id="leaderboard-note" class="muted-note"></p>
@@ -174,8 +174,8 @@
         <label for="send-channel">Channel</label>
         <select id="send-channel"></select>
         <label for="send-message">Message</label>
-        <textarea id="send-message" rows="5" placeholder="Type what AniTracker should post…"></textarea>
-        <button id="send-btn" class="btn btn-primary">Send as AniTracker</button>
+        <textarea id="send-message" rows="5" placeholder="Type what TV Tracker should post…"></textarea>
+        <button id="send-btn" class="btn btn-primary">Send as TV Tracker</button>
         <p id="send-result" class="muted-note" role="status" aria-live="polite"></p>
       </div>
     </section>
@@ -187,7 +187,7 @@
         <div class="control-row">
           <div>
             <p class="control-title">Polling</p>
-            <p class="muted-note">Pausing stops AniList polling &amp; new activity posts. Slash commands still work.</p>
+            <p class="muted-note">Pausing stops Simkl polling &amp; new watch posts. Slash commands still work.</p>
           </div>
           <button id="pause-resume-btn" class="btn btn-primary">Pause</button>
         </div>

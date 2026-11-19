@@ -1,202 +1,51 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
-// Builds the private "More Info" panel for one anime/manga entry.
-// Pure formatting — fetching happens in index.js.
+// The private "More Info" panel for one movie or show. Pure formatting;
+// fetching happens in index.js.
 
 const DEFAULT_COLOR = 0x3db4f2;
 
-const FORMAT_LABELS = {
-  TV: 'TV',
-  TV_SHORT: 'TV Short',
-  MOVIE: 'Movie',
-  SPECIAL: 'Special',
-  OVA: 'OVA',
-  ONA: 'ONA',
-  MUSIC: 'Music',
-  MANGA: 'Manga',
-  NOVEL: 'Light Novel',
-  ONE_SHOT: 'One-shot',
-};
-
-const STATUS_LABELS = {
-  FINISHED: 'Finished',
-  RELEASING: 'Airing',
-  NOT_YET_RELEASED: 'Not yet released',
-  CANCELLED: 'Cancelled',
-  HIATUS: 'On hiatus',
-};
-
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
-function titleOf(media) {
-  return media.title?.english || media.title?.romaji || 'Unknown title';
-}
-
-function prettyEnum(value) {
-  if (!value) return null;
-  return value
-    .toLowerCase()
-    .split('_')
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
-}
-
-function formatDate(d) {
-  if (!d || !d.year) return null;
-  if (d.month) return `${MONTHS[d.month - 1]} ${d.day ? `${d.day}, ` : ''}${d.year}`;
-  return String(d.year);
-}
-
-function trailerUrl(trailer) {
-  if (!trailer?.id) return null;
-  if (trailer.site === 'youtube') return `https://www.youtube.com/watch?v=${trailer.id}`;
-  if (trailer.site === 'dailymotion') return `https://www.dailymotion.com/video/${trailer.id}`;
-  return null;
-}
-
-function hexToInt(hex) {
-  if (!hex || !/^#?[0-9a-f]{6}$/i.test(hex)) return null;
-  return parseInt(hex.replace('#', ''), 16);
-}
-
 function truncate(text, max) {
   if (!text) return '';
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+  return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
 }
 
-/**
- * @param media  result of anilist.getMediaDetails
- * @param extra  { seasonNumber, totalSeasons }
- */
-function buildMoreInfo(media, extra = {}) {
-  const isManga = media.type === 'MANGA';
-  const title = titleOf(media);
-  const color = hexToInt(media.coverImage?.color) || DEFAULT_COLOR;
+function kindLabel(kind) {
+  return kind === 'movie' ? '🎬 Movie' : '📺 TV show';
+}
 
-  const headerBits = [FORMAT_LABELS[media.format] || prettyEnum(media.format), STATUS_LABELS[media.status]].filter(Boolean);
+function buildMoreInfo(title, extra = {}) {
+  const embed = new EmbedBuilder()
+    .setColor(extra.color ?? DEFAULT_COLOR)
+    .setTitle(`${title.title}${title.year ? ` (${title.year})` : ''}`)
+    .setURL(title.siteUrl);
 
-  // Everything already on the activity post (cover, score, genres, popularity
-  // rank, mature tag, synopsis) is deliberately left out here — this panel
-  // only adds what the post doesn't show, in a tidy 3-column grid.
-  const altTitle = media.title?.native || (media.title?.english && media.title?.romaji !== media.title?.english ? media.title.romaji : null);
+  const facts = [kindLabel(title.kind)];
+  if (title.rating) facts.push(`⭐ ${title.rating.toFixed(1)}/10 (Simkl)`);
+  if (title.genres.length) facts.push(`🎭 ${title.genres.slice(0, 3).join(', ')}`);
+  if (extra.runtime) facts.push(`⏱️ ${extra.runtime} min`);
+  if (title.kind === 'show' && title.episodes) facts.push(`🎞️ ${title.episodes} episodes`);
+  if (title.status) facts.push(`📡 ${String(title.status).replace(/^./, (c) => c.toUpperCase())}`);
 
-  const main = new EmbedBuilder()
-    .setColor(color)
-    .setTitle(truncate(title, 256))
-    .setURL(media.siteUrl)
-    .setFooter({ text: 'Only you can see this • Data from AniList' });
+  const lines = [facts.join('  •  ')];
+  if (title.overview) lines.push('', truncate(title.overview, 600));
+  embed.setDescription(lines.join('\n'));
 
-  if (headerBits.length) main.setAuthor({ name: headerBits.join('  •  ') });
-  if (altTitle) main.setDescription(`*${truncate(altTitle, 200)}*`);
-  if (media.bannerImage) main.setImage(media.bannerImage);
+  if (title.poster) embed.setImage(title.poster);
 
   const fields = [];
+  if (extra.network) fields.push({ name: 'Network', value: extra.network, inline: true });
+  if (extra.cast?.length) fields.push({ name: 'Cast', value: extra.cast.slice(0, 5).join(', '), inline: false });
+  if (fields.length) embed.addFields(fields);
 
-  // Row 1: length · seasons · dates
-  if (isManga) {
-    const ch = media.chapters ? `${media.chapters} chapters` : media.status === 'RELEASING' ? 'Ongoing' : 'Unknown';
-    const vol = media.volumes ? `${media.volumes} volumes` : null;
-    fields.push({ name: '📖 Length', value: [ch, vol].filter(Boolean).join('\n'), inline: true });
-  } else {
-    let eps;
-    if (media.episodes) eps = `${media.episodes} episode${media.episodes === 1 ? '' : 's'}`;
-    else if (media.nextAiringEpisode) eps = `${media.nextAiringEpisode.episode - 1} so far`;
-    else eps = 'Unknown';
-    const dur = media.duration ? `${media.duration} min${media.episodes === 1 ? '' : ' each'}` : null;
-    fields.push({ name: '📺 Episodes', value: [eps, dur].filter(Boolean).join('\n'), inline: true });
-  }
+  const links = [];
+  if (title.imdb) links.push(`[IMDb](https://www.imdb.com/title/${title.imdb})`);
+  if (extra.trailerUrl) links.push(`[Trailer](${extra.trailerUrl})`);
+  links.push(`[Simkl](${title.siteUrl})`);
+  embed.addFields({ name: 'Links', value: links.join(' · '), inline: false });
 
-  if (!isManga && extra.totalSeasons) {
-    const value =
-      extra.seasonNumber && extra.totalSeasons > 1
-        ? `Season ${extra.seasonNumber} of ${extra.totalSeasons}`
-        : `${extra.totalSeasons} season${extra.totalSeasons === 1 ? '' : 's'}`;
-    fields.push({ name: '🗂️ Seasons', value, inline: true });
-  }
-
-  const start = formatDate(media.startDate);
-  const end = formatDate(media.endDate);
-  const seasonTag = media.season && media.seasonYear ? `${prettyEnum(media.season)} ${media.seasonYear}` : null;
-  if (start || seasonTag) {
-    const range = start ? (end && end !== start ? `${start} → ${end}` : media.status === 'RELEASING' ? `${start} → now` : start) : null;
-    fields.push({ name: isManga ? '📅 Published' : '📅 Aired', value: [seasonTag, range].filter(Boolean).join('\n'), inline: true });
-  }
-
-  // Row 2: next episode · studio · source
-  if (media.nextAiringEpisode?.airingAt) {
-    fields.push({ name: '⏭️ Next episode', value: `Ep ${media.nextAiringEpisode.episode}\n<t:${media.nextAiringEpisode.airingAt}:R>`, inline: true });
-  }
-  const studio = media.studios?.nodes?.[0];
-  if (studio) fields.push({ name: '🏢 Studio', value: studio.siteUrl ? `[${studio.name}](${studio.siteUrl})` : studio.name, inline: true });
-  if (media.source) fields.push({ name: '📚 Source', value: prettyEnum(media.source), inline: true });
-
-  // Full width: tags (spoiler-free, and only ones AniList rates as relevant)
-  const tags = (media.tags || [])
-    .filter((t) => !t.isMediaSpoiler && !t.isGeneralSpoiler && t.rank >= 60)
-    .slice(0, 6)
-    .map((t) => t.name);
-  if (tags.length) fields.push({ name: '🏷️ Tags', value: tags.join(' · '), inline: false });
-
-  main.addFields(fields.slice(0, 25));
-
-  const embeds = [main];
-
-  // Main cast — Discord merges embeds that share the same URL into one
-  // image gallery, so the three character portraits show side by side.
-  const cast = (media.characters?.edges || []).filter((e) => e.node);
-  if (cast.length) {
-    const castUrl = `${media.siteUrl}/characters`;
-    const lines = cast.map((e) => {
-      const name = e.node.siteUrl ? `[${e.node.name.full}](${e.node.siteUrl})` : e.node.name.full;
-      const va = e.voiceActors?.[0]?.name?.full;
-      return `**${name}** · ${prettyEnum(e.role) || 'Character'}${va ? `\n-# CV: ${va}` : ''}`;
-    });
-    const castEmbed = new EmbedBuilder()
-      .setColor(color)
-      .setTitle('🎭 Main Cast')
-      .setURL(castUrl)
-      .setDescription(lines.join('\n'));
-    const images = cast.map((e) => e.node.image?.large).filter(Boolean);
-    if (images[0]) castEmbed.setImage(images[0]);
-    embeds.push(castEmbed);
-    for (const img of images.slice(1, 4)) {
-      embeds.push(new EmbedBuilder().setURL(castUrl).setImage(img));
-    }
-  }
-
-  // Link buttons
-  const buttons = [];
-  const trailer = trailerUrl(media.trailer);
-  buttons.push(
-    new ButtonBuilder()
-      .setStyle(ButtonStyle.Link)
-      .setEmoji('🎬')
-      .setLabel(trailer ? 'Trailer' : 'Find trailer')
-      .setURL(trailer || `https://www.youtube.com/results?search_query=${encodeURIComponent(`${title} trailer`)}`)
-  );
-
-  const stream = (media.externalLinks || []).find((l) => l.type === 'STREAMING' && !l.isDisabled && /^https?:\/\//.test(l.url));
-  if (stream) {
-    buttons.push(
-      new ButtonBuilder()
-        .setStyle(ButtonStyle.Link)
-        .setEmoji('📡')
-        .setLabel(truncate(`Watch on ${stream.site}`, 80))
-        .setURL(stream.url)
-    );
-  }
-
-  buttons.push(new ButtonBuilder().setStyle(ButtonStyle.Link).setEmoji('🔗').setLabel('AniList').setURL(media.siteUrl));
-  if (media.idMal) {
-    buttons.push(
-      new ButtonBuilder()
-        .setStyle(ButtonStyle.Link)
-        .setLabel('MyAnimeList')
-        .setURL(`https://myanimelist.net/${isManga ? 'manga' : 'anime'}/${media.idMal}`)
-    );
-  }
-
-  return { embeds, components: [new ActionRowBuilder().addComponents(buttons.slice(0, 5))] };
+  embed.setFooter({ text: 'Only you can see this • Data from Simkl' });
+  return { embeds: [embed], components: [] };
 }
 
-module.exports = { buildMoreInfo };
+module.exports = { buildMoreInfo, DEFAULT_COLOR };

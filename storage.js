@@ -63,16 +63,16 @@ function ensureTopLevel(data) {
   if (!data || typeof data !== 'object') data = {};
   if (!data.guilds) data.guilds = {};
   if (typeof data.botPaused !== 'boolean') data.botPaused = false;
-  // watchStats: global counter of how many times each root anime/manga has
+  // watchStats: legacy counter from the AniList version (no longer written) of how many times each root anime/manga has
   // shown up in a posted activity update (dashboard "Most Watched").
   if (!data.watchStats) data.watchStats = {};
   // globalRecommendations: cross-server "Recommend" tally, one vote per user.
   if (!data.globalRecommendations) data.globalRecommendations = {};
-  // linkedAccounts: Discord user id -> { anilistId, anilistName, avatar, siteUrl, linkedAt }.
-  // Filled by /signin (AniList OAuth). This is what proves a Discord user
-  // actually owns an AniList profile.
+  // linkedAccounts: Discord user id -> { token, simklId, name, avatar, siteUrl, linkedAt }.
+  // Filled by /signin (Simkl device code). The token lets the bot read that
+  // person's watch history. Tokens are stored as-is; keep the storage private.
   if (!data.linkedAccounts) data.linkedAccounts = {};
-  // trackingOptOut: AniList user id -> { since, by }. Set by /tracking off.
+  // trackingOptOut: Discord user id -> { since, by }. Set by /tracking off.
   // The poller skips these profiles everywhere until turned back on.
   if (!data.trackingOptOut) data.trackingOptOut = {};
   // userLists: Discord user id -> { watchlist: [], favorites: [] }. One list

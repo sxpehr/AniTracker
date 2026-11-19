@@ -16,45 +16,34 @@ const {
   MessageFlags,
 } = require('discord.js');
 const { loadData, saveData, flushData, isStorageHealthy, backend: storageBackend } = require('./storage');
-const {
-  getUserByName,
-  getRecentActivities,
-  getMediaById,
-  getUserFavorites,
-  getMediaRelations,
-  getMediaDetails,
-} = require('./anilist');
+const simkl = require('./simkl');
 const { getDominantColor, DEFAULT_COLOR } = require('./imageColor');
 const { buildDashboardRouter } = require('./dashboard/routes');
-const { buildOAuthRouter, signInUrlFor, isOAuthConfigured } = require('./oauth');
 const { buildMoreInfo } = require('./moreInfo');
 const feedback = require('./feedback');
 const { commands: slashCommands } = require('./commands');
 const { LATEST_UPDATE } = require('./changelog');
 
 const POLL_INTERVAL_MS = (parseInt(process.env.POLL_MINUTES, 10) || 3) * 60 * 1000;
-const ANIME_ROLE_NAME = 'anime'; // server role (case-insensitive) pinged on relaunch
-const RELAUNCH_NOTICE_COOLDOWN_MS = 12 * 60 * 60 * 1000; // at most one "I restarted" ping per 12h
-const MAX_RECENT_POSTS = 300; // per guild, for reaction/recommend lookups
-const MAX_SEASON_HOPS = 6; // safety cap on how far back we walk a prequel chain
-const MAX_FRANCHISE_HOPS = 12; // safety cap walking a sequel chain for "More Info"
+const PING_ROLE_NAME = (process.env.PING_ROLE_NAME || 'tv').toLowerCase(); // role pinged on relaunch
+const RELAUNCH_NOTICE_COOLDOWN_MS = 12 * 60 * 60 * 1000;
+const MAX_RECENT_POSTS = 300; // per server, for reaction/recommend lookups
 const MAX_CACHE_ENTRIES = 1000;
-const MEDIA_DETAILS_TTL_MS = 15 * 60 * 1000;
+const DETAILS_TTL_MS = 15 * 60 * 1000;
 const REACTION_DM_DEDUPE_MS = 10 * 60 * 1000;
+const RECOMMEND_EMBED_COLOR = 0xff9800;
 const EPHEMERAL = MessageFlags.Ephemeral;
-const TV_FORMATS = new Set(['TV', 'TV_SHORT', 'ONA']);
+const KINDS = new Set(['movie', 'show']);
 
 // What the bot needs in its posting channel. Checked before posting and when
-// a channel is chosen, so a missing permission gives a clear message instead
-// of silent failures.
+// a channel is chosen, so a missing permission gives a clear message.
 const REQUIRED_CHANNEL_PERMS = [
   ['ViewChannel', PermissionFlagsBits.ViewChannel],
   ['SendMessages', PermissionFlagsBits.SendMessages],
   ['EmbedLinks', PermissionFlagsBits.EmbedLinks],
   ['ReadMessageHistory', PermissionFlagsBits.ReadMessageHistory],
 ];
-// What the invite link asks for (set the same set in the Developer Portal ->
-// Installation -> Default Install Settings).
+// What the invite link asks for (match the Developer Portal's Default Install Settings).
 const INVITE_PERMISSIONS = new PermissionsBitField([
   PermissionFlagsBits.ViewChannel,
   PermissionFlagsBits.SendMessages,
@@ -67,33 +56,27 @@ const INVITE_PERMISSIONS = new PermissionsBitField([
 ]);
 
 /* ---------------------------------------------------------------------------
- * Small bounded caches (the old season cache grew forever)
+ * Small bounded caches
  * ------------------------------------------------------------------------- */
 function boundedSet(map, key, value) {
   map.set(key, value);
   if (map.size > MAX_CACHE_ENTRIES) map.delete(map.keys().next().value);
 }
-const seasonCache = new Map(); // mediaId -> { season, rootId, rootTitle, rootSiteUrl, popularityRank }
-const franchiseCache = new Map(); // rootId -> [tv-ish media ids in order]
-const mediaDetailsCache = new Map(); // mediaId -> { at, media }
+const detailsCache = new Map(); // key -> { at, title }
 const reactionDmSeen = new Map(); // `${msg}:${user}:${emoji}` -> timestamp
 const warnedChannels = new Set();
+const pendingLogins = new Map(); // discord user id -> timer for an open /signin
+const warnedUnlinked = new Set(); // tracked people whose sign-in is gone (warn once)
 
 // Polling can be paused from the dashboard. Backed by data.botPaused.
 let isPaused = false;
 let pollRunning = false;
-// Result of the last slash-command sync — shown on /health so a failed
-// registration is visible without digging through logs.
+// Result of the last slash-command sync, shown on /health.
 let commandSync = { ok: null, count: 0, error: null, at: null, clearedGuilds: 0 };
 const botStartedAt = Date.now();
 
 /* ---------------------------------------------------------------------------
- * Crash guards
- *
- * Unhandled promise rejections terminate Node by default — and Render then
- * restarts the bot. Several code paths (un-awaited interaction replies,
- * async Express routes, expired interactions) could produce one. These
- * handlers log the problem instead of taking the whole bot down.
+ * Crash guards: a stray async error must log, not restart the bot
  * ------------------------------------------------------------------------- */
 process.on('unhandledRejection', (reason) => {
   console.error('[unhandledRejection]', reason instanceof Error ? reason.stack || reason.message : reason);
@@ -106,33 +89,30 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMessageReactions],
   partials: [Partials.Message, Partials.Reaction, Partials.Channel, Partials.User],
 });
-
-// An 'error' event with no listener is thrown as an exception by Node's
-// EventEmitter — another way the bot used to crash on network blips.
 client.on(Events.Error, (err) => console.error('[discord client error]', err.message));
 client.on(Events.Warn, (msg) => console.warn('[discord warn]', msg));
-client.on(Events.ShardDisconnect, (ev, id) => console.warn(`[discord] shard ${id} disconnected (${ev?.code}) — discord.js will reconnect`));
+client.on(Events.ShardDisconnect, (ev, id) => console.warn(`[discord] shard ${id} disconnected (${ev?.code}), discord.js will reconnect`));
 client.on(Events.ShardReconnecting, (id) => console.warn(`[discord] shard ${id} reconnecting…`));
 client.on(Events.ShardResume, (id) => console.log(`[discord] shard ${id} resumed`));
 
 /* ---------------------------------------------------------------------------
- * Web server: keep-alive, health, dashboard, AniList sign-in callback
+ * Web server: keep-alive, health, dashboard
  * ------------------------------------------------------------------------- */
 const PORT = process.env.PORT || 3000;
 const app = express();
 app.disable('x-powered-by');
 
 app.get('/', (req, res) => {
-  res.type('text/plain').send('AniTracker is running.');
+  res.type('text/plain').send('TV Tracker is running.');
 });
 
-// Lightweight JSON for UptimeRobot / debugging restarts.
 app.get('/health', (req, res) => {
   const mem = process.memoryUsage();
   res.json({
     ok: true,
     discordReady: client.isReady(),
     storage: isStorageHealthy() ? 'ok' : 'unavailable',
+    simkl: simkl.isConfigured() ? 'configured' : 'missing SIMKL_CLIENT_ID',
     uptimeSeconds: Math.floor((Date.now() - botStartedAt) / 1000),
     memoryMB: Math.round(mem.rss / 1024 / 1024),
     commands: commandSync,
@@ -155,9 +135,7 @@ app.use(
     isStorageHealthy,
   })
 );
-app.use(buildOAuthRouter({ loadData, saveData, onLinked: sendLinkedConfirmation }));
 
-// Last-resort Express error handler — a thrown route must never crash the process.
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   console.error('[express]', req.method, req.path, err.stack || err.message);
@@ -175,10 +153,8 @@ async function recordBoot() {
   const data = await loadData();
   const previous = data.bootHistory[data.bootHistory.length - 1];
   if (previous && !previous.endedAt) {
-    // The last run never reached our shutdown handler: it was killed hard —
-    // usually Render's out-of-memory kill or a crash.
     previous.reason = 'unexpected (crash, out-of-memory, or hard kill)';
-    console.warn('Previous run ended unexpectedly (no clean shutdown recorded). Check Render → Events/Logs around', previous.startedAt);
+    console.warn('Previous run ended unexpectedly (no clean shutdown recorded). Check your host logs around', previous.startedAt);
   }
   currentBoot = {
     startedAt: new Date(botStartedAt).toISOString(),
@@ -194,13 +170,13 @@ let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`${signal} received — shutting down cleanly…`);
+  console.log(`${signal} received, shutting down cleanly…`);
   const hardExit = setTimeout(() => process.exit(0), 8000);
   hardExit.unref();
   try {
     if (currentBoot) {
       currentBoot.endedAt = new Date().toISOString();
-      currentBoot.reason = signal === 'SIGTERM' ? 'clean stop (Render deploy/restart)' : `clean stop (${signal})`;
+      currentBoot.reason = signal === 'SIGTERM' ? 'clean stop (deploy or restart)' : `clean stop (${signal})`;
       saveData();
     }
     await flushData();
@@ -214,23 +190,18 @@ async function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-// Memory watch: Render's free tier kills the process at 512 MB, which shows
-// up as a "random" restart. Log usage, and shed caches if it gets high.
+// Memory watch: shed caches if the process gets large.
 setInterval(() => {
   const rssMB = Math.round(process.memoryUsage().rss / 1024 / 1024);
   if (rssMB > 380) {
-    console.warn(`[memory] RSS ${rssMB} MB — clearing caches`);
-    seasonCache.clear();
-    franchiseCache.clear();
-    mediaDetailsCache.clear();
+    console.warn(`[memory] RSS ${rssMB} MB, clearing caches`);
+    detailsCache.clear();
   } else {
     console.log(`[memory] RSS ${rssMB} MB`);
   }
 }, 15 * 60 * 1000).unref();
 
-// Registers the global slash commands, then removes any old server-only
-// copies (left over from running deploy-commands with GUILD_ID), which
-// would otherwise shadow/duplicate the global ones in that server.
+// Registers the global slash commands, then removes any old server-only copies.
 async function syncCommands() {
   commandSync = { ok: null, count: 0, error: null, at: new Date().toISOString(), clearedGuilds: 0 };
   try {
@@ -264,19 +235,38 @@ function getInviteUrl() {
   return `https://discord.com/oauth2/authorize?client_id=${id}&permissions=${INVITE_PERMISSIONS.bitfield}&integration_type=0&scope=bot+applications.commands`;
 }
 
-client.once(Events.ClientReady, async () => {
-  console.log(`Logged in as ${client.user.tag} — in ${client.guilds.cache.size} server(s)`);
-  console.log(`Invite link: ${getInviteUrl()}`);
-  if (!isOAuthConfigured()) {
-    console.warn('AniList sign-in is NOT configured (ANILIST_CLIENT_ID / ANILIST_CLIENT_SECRET / PUBLIC_URL). /signin will say so.');
+// One-time cleanup when the bot moved from AniList to Simkl. Old AniList ids
+// mean nothing to Simkl, so tracked entries, sign-ins and lists are reset.
+function migrateToSimkl(data) {
+  if (data.simklMigrated) return false;
+  for (const guildData of Object.values(data.guilds)) {
+    guildData.users = (guildData.users || []).filter((u) => u.discordId);
+    guildData.recommendations = {};
+    guildData.recentPosts = {};
   }
-  // Keep Discord's global command list in sync with commands.js on every
-  // start, so new/changed commands go live with a normal deploy.
+  data.globalRecommendations = {};
+  data.trackingOptOut = {};
+  data.linkedAccounts = Object.fromEntries(Object.entries(data.linkedAccounts || {}).filter(([, a]) => a.token));
+  data.userLists = {};
+  data.simklMigrated = true;
+  return true;
+}
+
+client.once(Events.ClientReady, async () => {
+  console.log(`Logged in as ${client.user.tag}, in ${client.guilds.cache.size} server(s)`);
+  console.log(`Invite link: ${getInviteUrl()}`);
+  if (!simkl.isConfigured()) {
+    console.warn('SIMKL_CLIENT_ID is not set. Sign-in and tracking will say so until it is added.');
+  }
   await syncCommands();
 
   const data = await loadData();
+  if (migrateToSimkl(data)) {
+    await saveData(data);
+    console.log('Migrated stored data from AniList to Simkl (old AniList entries cleared).');
+  }
   isPaused = data.botPaused;
-  if (isPaused) console.log('Polling starting in PAUSED state (resume from the dashboard to enable it).');
+  if (isPaused) console.log('Polling starting PAUSED (resume from the dashboard to enable it).');
   pollAllGuilds();
   setInterval(pollAllGuilds, POLL_INTERVAL_MS);
   notifyRelaunch();
@@ -285,8 +275,6 @@ client.once(Events.ClientReady, async () => {
 /* ---------------------------------------------------------------------------
  * Helpers
  * ------------------------------------------------------------------------- */
-
-// Makes sure a guild's data object has every field newer features need.
 function ensureGuildData(data, guildId) {
   if (!data.guilds[guildId]) {
     data.guilds[guildId] = { channelId: null, users: [], recommendations: {}, recentPosts: {} };
@@ -306,17 +294,8 @@ function ensureUserLists(data, userId) {
   return lists;
 }
 
-function isOptedOut(data, anilistId) {
-  return Boolean(data.trackingOptOut[String(anilistId)]);
-}
-
-// The Discord user who "owns" a tracked profile: whoever signed in with that
-// AniList account if anyone has, otherwise whoever ran /track.
-function profileOwnerId(data, anilistId, fallbackDiscordId) {
-  for (const [discordId, acct] of Object.entries(data.linkedAccounts)) {
-    if (acct.anilistId === anilistId) return discordId;
-  }
-  return fallbackDiscordId || null;
+function isOptedOut(data, discordId) {
+  return Boolean(data.trackingOptOut[discordId]);
 }
 
 function missingChannelPerms(channel) {
@@ -331,13 +310,10 @@ function prettyPerm(name) {
   return name.replace(/([a-z])([A-Z])/g, '$1 $2');
 }
 
-// Replies (or edits a deferred reply) without ever throwing — an expired
-// interaction must not be able to crash anything.
+// Replies (or edits a deferred reply) without ever throwing.
 async function respond(interaction, payload) {
   try {
     if (interaction.deferred || interaction.replied) {
-      // Visibility is fixed when the reply/defer was created; editReply
-      // doesn't accept the Ephemeral flag, so drop it here.
       const { flags, ...rest } = typeof payload === 'string' ? { content: payload } : payload;
       return await interaction.editReply(rest);
     }
@@ -358,32 +334,34 @@ async function safeDefer(interaction, ephemeral) {
   }
 }
 
-function titleOf(media) {
-  return media?.title?.english || media?.title?.romaji || 'Unknown title';
+function titleKey(kind, id) {
+  return `${kind}_${id}`;
 }
 
-function stars(n) {
-  return '★'.repeat(n) + '☆'.repeat(5 - n);
+function parseKey(key) {
+  const [kind, id] = String(key).split('_');
+  if (!KINDS.has(kind)) return null;
+  const num = parseInt(id, 10);
+  return num ? { kind, id: num, key: titleKey(kind, num) } : null;
 }
 
-function signInButtonRow(userId) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel('Sign in with AniList').setEmoji('🔐').setURL(signInUrlFor(userId))
-  );
+// Fetches one title (cached briefly so buttons on the same post are quick).
+async function fetchTitle(key) {
+  const parsed = parseKey(key);
+  if (!parsed) return null;
+  const cached = detailsCache.get(key);
+  if (cached && Date.now() - cached.at < DETAILS_TTL_MS) return cached.title;
+  const title = await simkl.getDetails(parsed.kind, parsed.id);
+  if (title) boundedSet(detailsCache, key, { at: Date.now(), title });
+  return title;
 }
 
-async function findAnimeRole(guild) {
-  try {
-    const roles = await guild.roles.fetch();
-    return roles.find((r) => r.name.toLowerCase() === ANIME_ROLE_NAME) || null;
-  } catch (e) {
-    console.error(`Failed to fetch roles for guild ${guild.id}:`, e.message);
-    return null;
-  }
+// Everything a signed-in person has watched, movies and shows together.
+async function loadLibrary(token) {
+  const [movies, shows] = await Promise.all([simkl.getWatched(token, 'movie'), simkl.getWatched(token, 'show')]);
+  return [...movies, ...shows];
 }
 
-// Pings the @Anime role once on startup — but at most once every 12 hours,
-// so a burst of deploys/restarts doesn't spam every server.
 async function notifyRelaunch() {
   const data = await loadData();
   if (Date.now() - data.lastRelaunchNoticeAt < RELAUNCH_NOTICE_COOLDOWN_MS) {
@@ -401,14 +379,15 @@ async function notifyRelaunch() {
       if (!guild) continue;
       const channel = await client.channels.fetch(guildData.channelId).catch(() => null);
       if (!channel || missingChannelPerms(channel).length) continue;
-      const animeRole = await findAnimeRole(guild);
-      if (!animeRole) continue;
+      const roles = await guild.roles.fetch().catch(() => null);
+      const role = roles?.find((r) => r.name.toLowerCase() === PING_ROLE_NAME);
+      if (!role) continue;
       await channel.send({
-        content: `<@&${animeRole.id}> 🔄 AniTracker just restarted. If your activity feed looks stale, re-run \`/track\` for your profile.`,
-        allowedMentions: { roles: [animeRole.id] },
+        content: `<@&${role.id}> 🔄 TV Tracker just restarted and is back online.`,
+        allowedMentions: { roles: [role.id] },
       });
     } catch (e) {
-      console.error(`Failed to send relaunch notice for guild ${guildId}:`, e.message);
+      console.error(`Failed to send relaunch notice for server ${guildId}:`, e.message);
     }
   }
 }
@@ -423,16 +402,17 @@ client.on(Events.GuildCreate, async (guild) => {
     if (!channel || missingChannelPerms(channel).length) return;
     const embed = new EmbedBuilder()
       .setColor(DEFAULT_COLOR)
-      .setTitle('✦ Thanks for adding AniTracker!')
+      .setTitle('📺 Thanks for adding TV Tracker!')
       .setDescription(
         [
-          'I post AniList activity (episodes watched, chapters read, status changes) right here in Discord.',
+          'I post movie and TV activity (what people finish and what they’re watching) right here in Discord.',
           '',
           '**Quick start**',
-          '`/setchannel` — pick where updates go (needs Manage Server)',
-          '`/track username:<AniList name>` — start posting someone’s activity',
-          '`/signin` — link your own AniList so you control your live activity',
-          '`/help` — everything else',
+          '`/setchannel`: pick where watch posts go (needs Manage Server)',
+          '`/signin`: link your Simkl account (a short code, no website)',
+          '`/track user:@someone`: post a signed-in person’s watches',
+          '`/find title:<name>`: look up any movie or show',
+          '`/help`: everything else',
         ].join('\n')
       );
     await channel.send({ embeds: [embed] });
@@ -476,12 +456,10 @@ client.on(Events.MessageReactionAdd, async (reaction, reactingUser) => {
     const postInfo = guildData.recentPosts[message.id];
     if (!postInfo) return;
 
-    const ownerId = profileOwnerId(data, postInfo.anilistId, postInfo.addedBy);
-    if (!ownerId || reactingUser.id === ownerId) return; // no owner, or reacting to your own post
+    const ownerId = postInfo.discordId;
+    if (!ownerId || reactingUser.id === ownerId) return;
 
     const emojiStr = reaction.emoji.toString();
-
-    // Toggling the same reaction on/off shouldn't spam DMs.
     const dedupeKey = `${message.id}:${reactingUser.id}:${reaction.emoji.id || reaction.emoji.name}`;
     const now = Date.now();
     if (now - (reactionDmSeen.get(dedupeKey) || 0) < REACTION_DM_DEDUPE_MS) return;
@@ -490,9 +468,8 @@ client.on(Events.MessageReactionAdd, async (reaction, reactingUser) => {
 
     const sourceEmbed = message.embeds[0];
     const cover = postInfo.cover || sourceEmbed?.image?.url || null;
-    const animeTitle = postInfo.animeTitle || 'your activity';
-    const animeUrl = postInfo.siteUrl || null;
-    const titleLink = animeUrl ? `[${animeTitle}](${animeUrl})` : `**${animeTitle}**`;
+    const titleName = postInfo.title || 'your watch';
+    const titleLink = postInfo.siteUrl ? `[${titleName}](${postInfo.siteUrl})` : `**${titleName}**`;
     const color = sourceEmbed?.color ?? DEFAULT_COLOR;
     const guildIcon = message.guild.iconURL({ size: 64 }) || undefined;
     const jumpRow = new ActionRowBuilder().addComponents(
@@ -500,22 +477,19 @@ client.on(Events.MessageReactionAdd, async (reaction, reactingUser) => {
     );
 
     const owner = await client.users.fetch(ownerId).catch(() => null);
-
-    // DM to the profile owner: who reacted, to what, and where.
     if (owner) {
       const embed = new EmbedBuilder()
         .setColor(color)
         .setAuthor({ name: `${reactingUser.displayName || reactingUser.username} reacted ${emojiStr}`, iconURL: reactingUser.displayAvatarURL({ size: 64 }) })
-        .setDescription(`<@${reactingUser.id}> reacted ${emojiStr} to you watching ${titleLink}\n\n🏠 **${message.guild.name}** · <#${message.channelId}>`)
+        .setDescription(`<@${reactingUser.id}> reacted ${emojiStr} to your post about ${titleLink}\n\n🏠 **${message.guild.name}** · <#${message.channelId}>`)
         .setFooter({ text: message.guild.name, iconURL: guildIcon })
         .setTimestamp(new Date());
       if (cover) embed.setThumbnail(cover);
       await owner.send({ embeds: [embed], components: [jumpRow], allowedMentions: { parse: [] } }).catch((e) =>
-        console.error(`Failed to DM profile owner ${ownerId}:`, e.message)
+        console.error(`Failed to DM ${ownerId}:`, e.message)
       );
     }
 
-    // DM to the reactor: private confirmation the alert went out.
     const confirm = new EmbedBuilder()
       .setColor(color)
       .setDescription(`✅ <@${ownerId}> was alerted of your ${emojiStr} on ${titleLink}\n\n🏠 **${message.guild.name}** · <#${message.channelId}>`)
@@ -537,17 +511,17 @@ async function handleSlashCommand(interaction) {
   const { commandName } = interaction;
 
   if (!interaction.inGuild()) {
-    await respond(interaction, { content: 'AniTracker commands only work inside a server.', flags: EPHEMERAL });
+    await respond(interaction, { content: 'TV Tracker commands only work inside a server.', flags: EPHEMERAL });
     return;
   }
 
-  // Modals must be shown as the very first response — do it before anything else.
+  // Modals must be shown as the very first response.
   if (commandName === 'feedback') {
     await handleFeedbackCommand(interaction);
     return;
   }
 
-  const data = await loadData(); // in-memory, instant
+  const data = await loadData();
   const guildData = ensureGuildData(data, interaction.guildId);
 
   try {
@@ -562,14 +536,14 @@ async function handleSlashCommand(interaction) {
         return await handleWhosTracking(interaction, data, guildData);
       case 'setchannel':
         return await handleSetChannel(interaction, data, guildData);
+      case 'find':
+        return await handleFind(interaction, data);
       case 'watchlater':
         return await handleMyList(interaction, data, 'watchlist');
       case 'myfavorites':
         return await handleMyList(interaction, data, 'favorites');
-      case 'recommendanimes':
-        return await handleRecommendAnimes(interaction, guildData, data);
-      case 'favorites':
-        return await handleFavorites(interaction);
+      case 'recommend':
+        return await handleRecommend(interaction, guildData, data);
       case 'signin':
         return await handleSignIn(interaction, data);
       case 'signout':
@@ -581,7 +555,7 @@ async function handleSlashCommand(interaction) {
       case 'update':
         return await handleUpdate(interaction, guildData);
       default:
-        return await respond(interaction, { content: 'Unknown command — try `/help`.', flags: EPHEMERAL });
+        return await respond(interaction, { content: 'Unknown command. Try `/help`.', flags: EPHEMERAL });
     }
   } catch (err) {
     console.error(`Error handling /${commandName}:`, err);
@@ -589,78 +563,86 @@ async function handleSlashCommand(interaction) {
   }
 }
 
+const simklDownMessage = '⚠️ Simkl isn’t responding right now (this is on Simkl’s side). Try again in a few minutes.';
+
 async function handleTrack(interaction, data, guildData) {
-  const username = interaction.options.getString('username').trim();
+  const target = interaction.options.getUser('user');
   if (!(await safeDefer(interaction, false))) return;
 
-  const existing = guildData.users.find((u) => u.username.toLowerCase() === username.toLowerCase());
-  if (existing) {
-    await respond(interaction, { content: `Already tracking **${existing.username}** in this server.`, allowedMentions: { parse: [] } });
+  if (target.bot) {
+    await respond(interaction, { content: 'Bots don’t watch anything.', flags: EPHEMERAL });
+    return;
+  }
+  const account = data.linkedAccounts[target.id];
+  if (!account?.token) {
+    await respond(interaction, {
+      content: `**${target.username}** hasn’t linked Simkl yet. They can run \`/signin\`, then you can run \`/track\` again.`,
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+  if (guildData.users.some((u) => u.discordId === target.id)) {
+    await respond(interaction, { content: `Already tracking **${account.name}** in this server.`, allowedMentions: { parse: [] } });
     return;
   }
 
-  let user;
+  // Start from their current history, so only what they watch from now on posts.
+  let baseline = null;
   try {
-    user = await getUserByName(username);
+    const library = await loadLibrary(account.token);
+    baseline = simkl.latestWatch(library) || new Date().toISOString();
   } catch (e) {
-    console.error('AniList lookup failed in /track:', e.message);
-    await respond(interaction, { content: '⚠️ AniList isn’t responding right now (this is on AniList’s side). Try again in a few minutes.' });
+    console.error('Simkl lookup failed in /track:', e.message);
+    const expired = e.status === 401;
+    await respond(interaction, {
+      content: expired
+        ? `**${target.username}**’s Simkl sign-in has expired. They need to run \`/signin\` again.`
+        : simklDownMessage,
+      allowedMentions: { parse: [] },
+    });
     return;
   }
-  if (!user) {
-    await respond(interaction, { content: `Couldn't find an AniList user named **${username}**.`, allowedMentions: { parse: [] } });
-    return;
-  }
-  // The exact-name check above can miss (different casing typed); check by id too.
-  if (guildData.users.some((u) => u.id === user.id)) {
-    await respond(interaction, { content: `Already tracking **${user.name}** in this server.`, allowedMentions: { parse: [] } });
-    return;
-  }
-
-  // Record the current latest activity id so we don't dump their whole history on first track.
-  const activities = await getRecentActivities(user.id, 1).catch(() => []);
-  const lastActivityId = activities.length ? activities[0].id : 0;
 
   guildData.users.push({
-    username: user.name,
-    id: user.id,
-    lastActivityId,
+    discordId: target.id,
+    name: account.name,
+    avatar: account.avatar || null,
+    siteUrl: account.siteUrl || null,
     addedBy: interaction.user.id,
-    avatar: user.avatar?.medium || null,
+    watchedAt: baseline,
+    stamps: null,
   });
   if (!guildData.channelId) guildData.channelId = interaction.channelId;
   await saveData(data);
 
-  const lines = [`✅ Now tracking **[${user.name}](${user.siteUrl})**. New updates will post in <#${guildData.channelId}> and quietly ping <@${interaction.user.id}>.`];
+  const lines = [`✅ Now tracking **${account.name}**. New watches will post in <#${guildData.channelId}> and quietly ping <@${interaction.user.id}>.`];
   const channel = await client.channels.fetch(guildData.channelId).catch(() => null);
   const missing = missingChannelPerms(channel);
   if (missing.length) {
-    lines.push(`\n⚠️ I can't post in <#${guildData.channelId}> yet — I'm missing **${missing.map(prettyPerm).join(', ')}** there. Fix my permissions or use \`/setchannel\`.`);
+    lines.push(`\n⚠️ I can’t post in <#${guildData.channelId}> yet. I’m missing **${missing.map(prettyPerm).join(', ')}** there. Fix my permissions or use \`/setchannel\`.`);
   }
-  if (isOptedOut(data, user.id)) {
-    lines.push('\n⏸️ This profile’s owner has turned their live activity **off** (`/tracking`), so nothing will post until they turn it back on.');
+  if (isOptedOut(data, target.id)) {
+    lines.push('\n⏸️ This person has turned their live posts **off** (`/tracking`), so nothing will post until they turn it back on.');
   }
   await respond(interaction, { content: lines.join('\n'), allowedMentions: { parse: [] } });
 }
 
 async function handleUntrack(interaction, data, guildData) {
-  const username = interaction.options.getString('username').trim();
-  const entry = guildData.users.find((u) => u.username.toLowerCase() === username.toLowerCase());
+  const target = interaction.options.getUser('user');
+  const entry = guildData.users.find((u) => u.discordId === target.id);
   if (!entry) {
-    await respond(interaction, { content: `Wasn't tracking anyone named **${username}** here.`, flags: EPHEMERAL, allowedMentions: { parse: [] } });
+    await respond(interaction, { content: `Wasn’t tracking **${target.username}** here.`, flags: EPHEMERAL, allowedMentions: { parse: [] } });
     return;
   }
 
-  // Who may untrack: whoever started tracking it, the AniList account's real
-  // (signed-in) owner, or a server manager.
-  const linked = data.linkedAccounts[interaction.user.id];
+  // Who may untrack: whoever started tracking, the person themselves, or a server manager.
   const allowed =
     entry.addedBy === interaction.user.id ||
-    (linked && linked.anilistId === entry.id) ||
+    entry.discordId === interaction.user.id ||
     interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
   if (!allowed) {
     await respond(interaction, {
-      content: `Only <@${entry.addedBy}> (who started tracking **${entry.username}**), the profile's owner, or someone with **Manage Server** can untrack it.`,
+      content: `Only <@${entry.addedBy}> (who started tracking **${entry.name}**), **${entry.name}** themselves, or someone with **Manage Server** can untrack them.`,
       flags: EPHEMERAL,
       allowedMentions: { parse: [] },
     });
@@ -669,34 +651,34 @@ async function handleUntrack(interaction, data, guildData) {
 
   guildData.users = guildData.users.filter((u) => u !== entry);
   await saveData(data);
-  await respond(interaction, { content: `🗑️ Stopped tracking **${entry.username}**.`, allowedMentions: { parse: [] } });
+  await respond(interaction, { content: `🗑️ Stopped tracking **${entry.name}**.`, allowedMentions: { parse: [] } });
 }
 
 function trackedLine(data, u, trackerLabel) {
-  const paused = isOptedOut(data, u.id) ? ' ⏸️' : '';
-  const streak = u.streak > 1 ? ` · 🔥 ${u.streak}` : '';
-  return `• **[${u.username}](https://anilist.co/user/${encodeURIComponent(u.username)})**${paused}${streak}${trackerLabel ? ` — ${trackerLabel}` : ''}`;
+  const paused = isOptedOut(data, u.discordId) ? ' ⏸️' : '';
+  const linked = data.linkedAccounts[u.discordId]?.token ? '' : ' ⚠️ sign-in expired';
+  const name = u.siteUrl ? `[${u.name}](${u.siteUrl})` : `**${u.name}**`;
+  return `• ${name}${paused}${linked}${trackerLabel ? ` · ${trackerLabel}` : ''}`;
 }
 
 async function handleList(interaction, data, guildData) {
   if (!guildData.users.length) {
-    await respond(interaction, { content: 'Not tracking any AniList profiles yet. Use `/track username:<name>` to add one.' });
+    await respond(interaction, { content: 'Not tracking anyone yet. Use `/track user:@someone` for a signed-in person.' });
     return;
   }
   const lines = guildData.users.map((u) => trackedLine(data, u, u.addedBy ? `<@${u.addedBy}>` : null));
   const embed = new EmbedBuilder()
     .setColor(DEFAULT_COLOR)
-    .setTitle(`📋 Tracked profiles (${guildData.users.length})`)
+    .setTitle(`📋 Tracked people (${guildData.users.length})`)
     .setDescription(`${guildData.channelId ? `Posting in <#${guildData.channelId}>\n\n` : ''}${lines.join('\n')}`.slice(0, 4096))
-    .setFooter({ text: '⏸️ = owner turned live activity off' });
-  // Mentions render as names but never ping.
+    .setFooter({ text: '⏸️ = turned live posts off · ⚠️ = needs /signin again' });
   await respond(interaction, { embeds: [embed], allowedMentions: { parse: [] } });
 }
 
-// Same info as /list, but with plain display names (no mentions at all).
+// Same as /list, with plain names (no mentions at all).
 async function handleWhosTracking(interaction, data, guildData) {
   if (!guildData.users.length) {
-    await respond(interaction, { content: 'Not tracking any AniList profiles yet.' });
+    await respond(interaction, { content: 'Not tracking anyone yet.' });
     return;
   }
   if (!(await safeDefer(interaction, false))) return;
@@ -710,10 +692,7 @@ async function handleWhosTracking(interaction, data, guildData) {
       return trackedLine(data, u, `tracked by ${trackerName}`);
     })
   );
-  const embed = new EmbedBuilder()
-    .setColor(DEFAULT_COLOR)
-    .setTitle("📋 Who's tracking what")
-    .setDescription(lines.join('\n').slice(0, 4096));
+  const embed = new EmbedBuilder().setColor(DEFAULT_COLOR).setTitle("📋 Who's tracking what").setDescription(lines.join('\n').slice(0, 4096));
   await respond(interaction, { embeds: [embed], allowedMentions: { parse: [] } });
 }
 
@@ -730,17 +709,52 @@ async function handleSetChannel(interaction, data, guildData) {
   const missing = missingChannelPerms(channel);
   if (missing.length) {
     await respond(interaction, {
-      content: `⚠️ I can't post in <#${channel.id}> — I'm missing **${missing.map(prettyPerm).join(', ')}** there. Give me those in the channel's permissions and run this again.`,
+      content: `⚠️ I can’t post in <#${channel.id}>. I’m missing **${missing.map(prettyPerm).join(', ')}** there. Give me those and run this again.`,
       flags: EPHEMERAL,
     });
     return;
   }
   guildData.channelId = channel.id;
   await saveData(data);
-  await respond(interaction, { content: `✅ AniList updates will now post in <#${channel.id}>.` });
+  await respond(interaction, { content: `✅ Watch posts will now go to <#${channel.id}>.` });
 }
 
-// /watchlater and /myfavorites — one list per person, across every server.
+/* ----- /find: look up a movie or show ----- */
+async function handleFind(interaction, data) {
+  const text = interaction.options.getString('title').trim();
+  if (!simkl.isConfigured()) {
+    await respond(interaction, { content: '🔧 Simkl isn’t set up for this bot yet (SIMKL_CLIENT_ID is missing).', flags: EPHEMERAL });
+    return;
+  }
+  if (!(await safeDefer(interaction, false))) return;
+  let results;
+  try {
+    results = await simkl.searchTitles(text, 'all', 5);
+  } catch (e) {
+    console.error('Simkl search failed:', e.message);
+    await respond(interaction, { content: simklDownMessage });
+    return;
+  }
+  if (!results.length) {
+    await respond(interaction, { content: `No movies or shows matched **${text}**. Try fewer words, or add the year (for example “Dune 2021”).`, allowedMentions: { parse: [] } });
+    return;
+  }
+  const best = results[0];
+  boundedSet(detailsCache, best.key, { at: Date.now(), title: best });
+  const color = await getDominantColor(best.poster).catch(() => DEFAULT_COLOR);
+  const panel = buildTitleCard(best, data, color);
+  const others = results.slice(1);
+  if (others.length) {
+    panel.embeds[0].addFields({
+      name: 'Other matches',
+      value: others.map((t) => `• [${t.title}${t.year ? ` (${t.year})` : ''}](${t.siteUrl}) · ${t.kind === 'movie' ? 'Movie' : 'TV'}`).join('\n').slice(0, 1024),
+      inline: false,
+    });
+  }
+  await respond(interaction, panel);
+}
+
+/* ----- /watchlater and /myfavorites: one list per person, across servers ----- */
 async function handleMyList(interaction, data, field) {
   const list = ensureUserLists(data, interaction.user.id)[field];
   const isWatch = field === 'watchlist';
@@ -750,8 +764,8 @@ async function handleMyList(interaction, data, field) {
   if (!list.length) {
     await respond(interaction, {
       content: isWatch
-        ? 'Your watch later list is empty. Click 📌 **Watch later** on any activity post to add one!'
-        : 'Your favorites list is empty. Click 🤍 **Favorite** on any activity post to add one! (Saved in AniTracker — not synced to your AniList favourites.)',
+        ? 'Your watch later list is empty. Click 📌 **Watch later** on any post or `/find` result to add one!'
+        : 'Your favorites list is empty. Click 🤍 **Favorite** on any post or `/find` result to add one!',
       flags: EPHEMERAL,
     });
     return;
@@ -760,7 +774,7 @@ async function handleMyList(interaction, data, field) {
   const lines = [];
   let length = 0;
   for (let i = 0; i < list.length; i++) {
-    const line = `\`${String(i + 1).padStart(2, ' ')}\` **[${list[i].title}](${list[i].siteUrl})**`;
+    const line = `\`${String(i + 1).padStart(2, ' ')}\` **[${list[i].title}](${list[i].siteUrl})**${list[i].year ? ` (${list[i].year})` : ''}`;
     if (length + line.length > 3800) {
       lines.push(`…and **${list.length - i}** more`);
       break;
@@ -773,18 +787,16 @@ async function handleMyList(interaction, data, field) {
     .setColor(DEFAULT_COLOR)
     .setTitle(`${icon} Your ${name} · ${list.length}`)
     .setDescription(lines.join('\n'))
-    .setFooter({ text: `Only you can see this • Click ${icon} again on a post to remove it${isWatch ? '' : ' • Not synced to AniList'}` });
+    .setFooter({ text: `Only you can see this • Click ${icon} again on a post to remove it` });
   if (list[0]?.cover) embed.setThumbnail(list[0].cover);
   await respond(interaction, { embeds: [embed], flags: EPHEMERAL });
 }
 
-/* ----- /recommendanimes ----- */
-const RECOMMEND_EMBED_COLOR = 0xff9800;
-
+/* ----- /recommend ----- */
 function buildRecommendEntries(recsObj) {
   return Object.entries(recsObj || {})
     .filter(([, r]) => r.title && r.recommendedBy && r.recommendedBy.length > 0)
-    .map(([mediaId, r]) => ({ mediaId, title: r.title, siteUrl: r.siteUrl, count: r.recommendedBy.length }))
+    .map(([key, r]) => ({ key, title: r.title, year: r.year, siteUrl: r.siteUrl, count: r.recommendedBy.length }))
     .sort((a, b) => b.count - a.count)
     .slice(0, 10);
 }
@@ -796,28 +808,24 @@ function buildRecommendEmbed(scope, guildData, data) {
 
   const embed = new EmbedBuilder()
     .setColor(RECOMMEND_EMBED_COLOR)
-    .setTitle('⭐ Most Recommended Anime')
-    .setFooter({ text: `Showing: ${scopeLabel} — use the menu below to switch` })
+    .setTitle('⭐ Most Recommended')
+    .setFooter({ text: `Showing: ${scopeLabel}. Use the menu below to switch.` })
     .setTimestamp(new Date());
 
   if (!entries.length) {
     embed.setDescription(
-      isGlobal
-        ? 'No recommendations anywhere yet — click ⭐ **Recommend** on an activity to start the leaderboard!'
-        : 'No recommendations in this server yet — click ⭐ **Recommend** on an activity to start the leaderboard!'
+      `No recommendations ${isGlobal ? 'anywhere' : 'in this server'} yet. Click ⭐ **Recommend** on a post to start the leaderboard!`
     );
     return embed;
   }
 
   const medals = ['🥇', '🥈', '🥉'];
   const totalVotes = entries.reduce((sum, e) => sum + e.count, 0);
-  embed.setDescription(
-    `**${scopeLabel}**  •  ${totalVotes} total ${totalVotes === 1 ? 'vote' : 'votes'} across ${entries.length} title${entries.length === 1 ? '' : 's'}`
-  );
+  embed.setDescription(`**${scopeLabel}**  •  ${totalVotes} total ${totalVotes === 1 ? 'vote' : 'votes'} across ${entries.length} title${entries.length === 1 ? '' : 's'}`);
   entries.forEach((e, i) => {
     embed.addFields({
-      name: `${medals[i] || `#${i + 1}`}  ${e.title}`.slice(0, 256),
-      value: `[View on AniList ↗](${e.siteUrl})\n**${e.count}** ${e.count === 1 ? 'vote' : 'votes'}`,
+      name: `${medals[i] || `#${i + 1}`}  ${e.title}${e.year ? ` (${e.year})` : ''}`.slice(0, 256),
+      value: `[View on Simkl ↗](${e.siteUrl})\n**${e.count}** ${e.count === 1 ? 'vote' : 'votes'}`,
       inline: entries.length > 3,
     });
   });
@@ -835,7 +843,7 @@ function buildRecommendScopeRow(scope) {
   return new ActionRowBuilder().addComponents(menu);
 }
 
-async function handleRecommendAnimes(interaction, guildData, data) {
+async function handleRecommend(interaction, guildData, data) {
   const scope = 'guild';
   await respond(interaction, { embeds: [buildRecommendEmbed(scope, guildData, data)], components: [buildRecommendScopeRow(scope)] });
 }
@@ -847,8 +855,7 @@ async function handleSelectMenu(interaction) {
   const scope = interaction.values[0] === 'global' ? 'global' : 'guild';
   const payload = { embeds: [buildRecommendEmbed(scope, guildData, data)], components: [buildRecommendScopeRow(scope)] };
 
-  // Only the person who ran the command switches the shared message; anyone
-  // else gets their own private copy instead of changing it for everybody.
+  // Only the person who ran the command switches the shared message.
   const ownerId = interaction.message.interactionMetadata?.user?.id;
   if (ownerId && ownerId !== interaction.user.id) {
     await respond(interaction, { ...payload, flags: EPHEMERAL });
@@ -861,134 +868,170 @@ async function handleSelectMenu(interaction) {
   }
 }
 
-async function handleFavorites(interaction) {
-  const username = interaction.options.getString('username').trim();
-  if (!(await safeDefer(interaction, false))) return;
-
-  let user;
-  try {
-    user = await getUserFavorites(username);
-  } catch (e) {
-    await respond(interaction, { content: '⚠️ AniList isn’t responding right now (this is on AniList’s side). Try again in a few minutes.' });
-    return;
-  }
-  if (!user) {
-    await respond(interaction, { content: `Couldn't find an AniList user named **${username}**.`, allowedMentions: { parse: [] } });
-    return;
-  }
-
-  const animeList = user.favourites?.anime?.nodes || [];
-  const mangaList = user.favourites?.manga?.nodes || [];
-  if (!animeList.length && !mangaList.length) {
-    await respond(interaction, { content: `**${user.name}** hasn't favourited anything on AniList yet.`, allowedMentions: { parse: [] } });
-    return;
-  }
-
-  const embed = new EmbedBuilder().setColor(DEFAULT_COLOR).setTitle(`💖 ${user.name}'s Favourites`).setURL(user.siteUrl);
-  if (user.avatar?.medium) embed.setThumbnail(user.avatar.medium);
-  const fmt = (list) =>
-    list
-      .map((m, i) => `\`${i + 1}\` [${titleOf(m)}](${m.siteUrl})`)
-      .join('\n')
-      .slice(0, 1024);
-  if (animeList.length) embed.addFields({ name: '📺 Anime', value: fmt(animeList), inline: mangaList.length > 0 });
-  if (mangaList.length) embed.addFields({ name: '📖 Manga', value: fmt(mangaList), inline: animeList.length > 0 });
-  await respond(interaction, { embeds: [embed] });
-}
-
-/* ----- /signin, /signout ----- */
+/* ----- /signin, /signout: Simkl device-code sign-in (no website) ----- */
 async function handleSignIn(interaction, data) {
-  if (!isOAuthConfigured()) {
-    await respond(interaction, {
-      content: '🔧 AniList sign-in isn’t switched on for this bot yet — the developer still needs to finish setting it up. Check back soon!',
-      flags: EPHEMERAL,
-    });
+  if (!simkl.isConfigured()) {
+    await respond(interaction, { content: '🔧 Simkl sign-in isn’t switched on for this bot yet. The developer needs to add SIMKL_CLIENT_ID.', flags: EPHEMERAL });
     return;
   }
   const linked = data.linkedAccounts[interaction.user.id];
-  const embed = new EmbedBuilder().setColor(DEFAULT_COLOR);
-  if (linked) {
-    embed
+  if (linked?.token) {
+    const embed = new EmbedBuilder()
+      .setColor(DEFAULT_COLOR)
       .setTitle('🔐 You’re signed in')
-      .setDescription(
-        `Linked to **[${linked.anilistName}](${linked.siteUrl})**.\n\nWant to switch accounts? Sign in again below with the other AniList account. Or use \`/signout\` to unlink.`
-      );
+      .setDescription(`Linked to **[${linked.name}](${linked.siteUrl || 'https://simkl.com'})**.\n\nTo switch accounts, run \`/signout\` first, then \`/signin\` again.`);
     if (linked.avatar) embed.setThumbnail(linked.avatar);
-  } else {
-    embed
-      .setTitle('🔐 Sign in with AniList')
-      .setDescription(
-        [
-          'Linking proves which AniList profile is yours, so **only you** can control it — like turning your live activity on/off with `/tracking`.',
-          '',
-          '• AniTracker only reads your **username and avatar**',
-          '• It never posts, edits, or changes anything on your AniList',
-          '• The link below is personal and expires in 15 minutes — don’t share it',
-        ].join('\n')
-      );
+    await respond(interaction, { embeds: [embed], flags: EPHEMERAL });
+    return;
   }
-  embed.setFooter({ text: 'Only you can see this' });
-  await respond(interaction, { embeds: [embed], components: [signInButtonRow(interaction.user.id)], flags: EPHEMERAL });
+
+  if (!(await safeDefer(interaction, true))) return;
+  let login;
+  try {
+    login = await simkl.startDeviceLogin();
+  } catch (e) {
+    console.error('Simkl sign-in start failed:', e.message);
+    await respond(interaction, { content: simklDownMessage, flags: EPHEMERAL });
+    return;
+  }
+
+  const minutes = Math.max(1, Math.round(login.expiresIn / 60));
+  const embed = new EmbedBuilder()
+    .setColor(DEFAULT_COLOR)
+    .setTitle('🔐 Sign in to Simkl')
+    .setDescription(
+      [
+        `1. Open **${login.verificationUrl}**`,
+        `2. Enter this code: **\`${login.userCode}\`**`,
+        '3. Approve TV Tracker. I’ll notice and finish here.',
+        '',
+        `The code expires in about ${minutes} minutes. Only you can see this message.`,
+        'TV Tracker only reads your watch history. It never changes your Simkl lists.',
+      ].join('\n')
+    );
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel('Open Simkl').setEmoji('🔐').setURL(login.verificationUrl)
+  );
+  await respond(interaction, { embeds: [embed], components: [row] });
+  watchDeviceLogin(interaction, login);
+}
+
+// Polls Simkl until the person approves, the code expires, or they say no.
+function watchDeviceLogin(interaction, login) {
+  const discordId = interaction.user.id;
+  const deadline = Date.now() + login.expiresIn * 1000;
+  let waitMs = login.interval * 1000;
+  if (pendingLogins.has(discordId)) clearTimeout(pendingLogins.get(discordId));
+
+  const finish = async (embed) => {
+    pendingLogins.delete(discordId);
+    const payload = { embeds: [embed], components: [] };
+    try {
+      await interaction.editReply(payload);
+    } catch {
+      await interaction.user.send(payload).catch(() => {});
+    }
+  };
+
+  const schedule = (ms) => {
+    const timer = setTimeout(tick, ms);
+    timer.unref?.();
+    pendingLogins.set(discordId, timer);
+  };
+
+  const tick = async () => {
+    pendingLogins.delete(discordId);
+    if (Date.now() > deadline) {
+      await finish(new EmbedBuilder().setColor(0xfb7185).setTitle('⌛ Code expired').setDescription('Run `/signin` again to get a new code.'));
+      return;
+    }
+    try {
+      const result = await simkl.pollDeviceLogin(login.deviceCode);
+      if (result.state === 'pending') return schedule(waitMs);
+      if (result.state === 'slow_down') {
+        waitMs += 5000;
+        return schedule(waitMs);
+      }
+      if (result.state === 'denied') {
+        await finish(new EmbedBuilder().setColor(0xfb7185).setTitle('Sign-in cancelled').setDescription('You said no on Simkl, so nothing was linked.'));
+        return;
+      }
+      if (result.state === 'expired') {
+        await finish(new EmbedBuilder().setColor(0xfb7185).setTitle('⌛ Code expired').setDescription('Run `/signin` again to get a new code.'));
+        return;
+      }
+      // Approved: find out whose account it is and save it.
+      const account = await simkl.getAccount(result.token);
+      const data = await loadData();
+      data.linkedAccounts[discordId] = {
+        token: result.token,
+        simklId: account.id,
+        name: account.name,
+        avatar: account.avatar,
+        siteUrl: account.siteUrl,
+        linkedAt: new Date().toISOString(),
+      };
+      await saveData(data);
+      const done = new EmbedBuilder()
+        .setColor(0x34d399)
+        .setTitle('✅ Simkl linked')
+        .setDescription(`Linked to **[${account.name}](${account.siteUrl})**.\n\nUse \`/tracking\` in any server to turn your live posts on or off.`);
+      if (account.avatar) done.setThumbnail(account.avatar);
+      await finish(done);
+    } catch (e) {
+      console.error('Simkl sign-in check failed:', e.message);
+      if (Date.now() < deadline) return schedule(waitMs);
+      await finish(new EmbedBuilder().setColor(0xfb7185).setTitle('Sign-in didn’t finish').setDescription('Simkl didn’t answer in time. Run `/signin` again.'));
+    }
+  };
+
+  schedule(waitMs);
 }
 
 async function handleSignOut(interaction, data) {
   const linked = data.linkedAccounts[interaction.user.id];
   if (!linked) {
-    await respond(interaction, { content: 'You’re not signed in. Use `/signin` to link your AniList account.', flags: EPHEMERAL });
+    await respond(interaction, { content: 'You’re not signed in. Use `/signin` to link your Simkl account.', flags: EPHEMERAL });
     return;
   }
   delete data.linkedAccounts[interaction.user.id];
   await saveData(data);
-  const stillOff = isOptedOut(data, linked.anilistId);
   await respond(interaction, {
-    content: `👋 Unlinked **${linked.anilistName}** from your Discord account.${
-      stillOff ? '\nYour live activity stays **off** — sign in again any time to turn it back on.' : ''
-    }`,
+    content: `👋 Unlinked **${linked.name}** from your Discord account. Nothing will post for you until you sign in again.`,
     flags: EPHEMERAL,
   });
 }
 
-async function sendLinkedConfirmation(discordUserId, account) {
-  const user = await client.users.fetch(discordUserId).catch(() => null);
-  if (!user) return;
-  const embed = new EmbedBuilder()
-    .setColor(DEFAULT_COLOR)
-    .setTitle('✅ AniList linked')
-    .setDescription(`Your Discord account is now linked to **[${account.anilistName}](${account.siteUrl})**.\n\nUse \`/tracking\` in any server to turn your live activity posts on or off.`);
-  if (account.avatar) embed.setThumbnail(account.avatar);
-  await user.send({ embeds: [embed] }).catch(() => {});
-}
-
-/* ----- /tracking (live activity on/off, owner only) ----- */
-function trackedInGuilds(data, anilistId) {
+/* ----- /tracking (live posts on/off, owner only) ----- */
+function trackedInGuilds(data, discordId) {
   const names = [];
   for (const [guildId, g] of Object.entries(data.guilds)) {
-    if ((g.users || []).some((u) => u.id === anilistId)) names.push(client.guilds.cache.get(guildId)?.name || 'a server');
+    if ((g.users || []).some((u) => u.discordId === discordId)) names.push(client.guilds.cache.get(guildId)?.name || 'a server');
   }
   return names;
 }
 
-function buildTrackingPanel(data, account) {
-  const off = isOptedOut(data, account.anilistId);
-  const servers = trackedInGuilds(data, account.anilistId);
+function buildTrackingPanel(data, discordId, account) {
+  const off = isOptedOut(data, discordId);
+  const servers = trackedInGuilds(data, discordId);
   const serverLine = servers.length
     ? `Tracked in **${servers.length}** server${servers.length === 1 ? '' : 's'}: ${servers.slice(0, 10).join(', ')}${servers.length > 10 ? '…' : ''}`
-    : 'Nobody is tracking your profile right now.';
+    : 'Nobody is tracking you right now.';
 
   const embed = new EmbedBuilder()
     .setColor(off ? 0xfb7185 : 0x34d399)
-    .setAuthor({ name: account.anilistName, iconURL: account.avatar || undefined, url: account.siteUrl })
-    .setTitle(off ? '🔴 Live activity is OFF' : '🟢 Live activity is ON')
+    .setAuthor({ name: account.name, iconURL: account.avatar || undefined, url: account.siteUrl || undefined })
+    .setTitle(off ? '🔴 Live posts are OFF' : '🟢 Live posts are ON')
     .setDescription(
       [
         off
-          ? 'Your AniList updates are **not** being posted in any server. Turning it back on starts from your *next* update — nothing you did while it was off gets posted.'
-          : 'Your AniList updates are posted in every server tracking you.',
+          ? 'Your watches are **not** being posted in any server. Turning it back on starts from your *next* watch. Nothing you watched while it was off gets posted.'
+          : 'Your watches are posted in every server tracking you.',
         '',
         serverLine,
       ].join('\n')
     )
-    .setFooter({ text: 'Only you can change this — it applies everywhere' });
+    .setFooter({ text: 'Only you can change this. It applies everywhere.' });
 
   const row = new ActionRowBuilder().addComponents(
     off
@@ -998,53 +1041,44 @@ function buildTrackingPanel(data, account) {
   return { embeds: [embed], components: [row] };
 }
 
-async function setLiveActivity(data, account, on, byUserId) {
-  const key = String(account.anilistId);
+async function setLiveActivity(data, discordId, account, on, byUserId) {
   if (on) {
-    if (!data.trackingOptOut[key]) return;
-    delete data.trackingOptOut[key];
-    // Skip anything they did while it was off: fast-forward every tracked
-    // entry for this profile to their latest activity.
-    const latest = await getRecentActivities(account.anilistId, 1).catch(() => []);
-    const latestId = latest[0]?.id;
-    if (latestId) {
-      for (const g of Object.values(data.guilds)) {
-        for (const u of g.users || []) if (u.id === account.anilistId) u.lastActivityId = Math.max(u.lastActivityId || 0, latestId);
-      }
+    if (!data.trackingOptOut[discordId]) return;
+    delete data.trackingOptOut[discordId];
+    // Skip anything watched while it was off: move each tracked entry to now.
+    const nowIso = new Date().toISOString();
+    for (const g of Object.values(data.guilds)) {
+      for (const u of g.users || []) if (u.discordId === discordId) u.watchedAt = nowIso;
     }
   } else {
-    data.trackingOptOut[key] = { since: new Date().toISOString(), by: byUserId };
+    data.trackingOptOut[discordId] = { since: new Date().toISOString(), by: byUserId };
   }
   await saveData(data);
 }
 
 async function handleTracking(interaction, data) {
   const account = data.linkedAccounts[interaction.user.id];
-  if (!account) {
+  if (!account?.token) {
     const embed = new EmbedBuilder()
       .setColor(DEFAULT_COLOR)
       .setTitle('🔐 Sign in first')
-      .setDescription(
-        'To make sure only the **real owner** of an AniList profile can turn its live activity on or off, link your AniList account first with `/signin` — then run `/tracking` again.'
-      );
-    const payload = { embeds: [embed], flags: EPHEMERAL };
-    if (isOAuthConfigured()) payload.components = [signInButtonRow(interaction.user.id)];
-    await respond(interaction, payload);
+      .setDescription('Link your Simkl account with `/signin`, then run `/tracking` again.');
+    await respond(interaction, { embeds: [embed], flags: EPHEMERAL });
     return;
   }
 
   const status = interaction.options.getString('status');
   if (status === 'on' || status === 'off') {
     if (!(await safeDefer(interaction, true))) return;
-    await setLiveActivity(data, account, status === 'on', interaction.user.id);
+    await setLiveActivity(data, interaction.user.id, account, status === 'on', interaction.user.id);
   }
-  await respond(interaction, { ...buildTrackingPanel(data, account), flags: EPHEMERAL });
+  await respond(interaction, { ...buildTrackingPanel(data, interaction.user.id, account), flags: EPHEMERAL });
 }
 
 async function handleTrackingButton(interaction, on) {
   const data = await loadData();
   const account = data.linkedAccounts[interaction.user.id];
-  if (!account) {
+  if (!account?.token) {
     await respond(interaction, { content: 'You need to `/signin` first.', flags: EPHEMERAL });
     return;
   }
@@ -1053,46 +1087,43 @@ async function handleTrackingButton(interaction, on) {
   } catch {
     return;
   }
-  await setLiveActivity(data, account, on, interaction.user.id);
-  await interaction.editReply(buildTrackingPanel(data, account)).catch((e) => console.error('Failed to refresh tracking panel:', e.message));
+  await setLiveActivity(data, interaction.user.id, account, on, interaction.user.id);
+  await interaction.editReply(buildTrackingPanel(data, interaction.user.id, account)).catch((e) => console.error('Failed to refresh tracking panel:', e.message));
 }
 
 /* ----- /help ----- */
 async function handleHelp(interaction) {
   const embed = new EmbedBuilder()
     .setColor(DEFAULT_COLOR)
-    .setTitle('✦ AniTracker commands')
+    .setTitle('📺 TV Tracker commands')
     .addFields(
       {
         name: '📡 Tracking',
         value: [
-          '`/track` — post someone’s AniList activity here',
-          '`/untrack` — stop tracking a profile',
-          '`/list` · `/whostracking` — who’s tracked in this server',
-          '`/setchannel` — where updates post *(Manage Server)*',
+          '`/track` · post a signed-in person’s watches here',
+          '`/untrack` · stop tracking someone',
+          '`/list` · `/whostracking` · who’s tracked here',
+          '`/setchannel` · where posts go *(Manage Server)*',
         ].join('\n'),
       },
       {
         name: '🔐 Your account',
-        value: ['`/signin` · `/signout` — link your AniList', '`/tracking` — turn your live activity on/off'].join('\n'),
+        value: ['`/signin` · `/signout` · link or unlink Simkl (short code)', '`/tracking` · turn your live posts on or off'].join('\n'),
       },
       {
-        name: '📚 Lists & discovery',
-        value: [
-          '`/watchlater` · `/myfavorites` — your private lists',
-          '`/recommendanimes` — most-recommended leaderboard',
-          '`/favorites` — anyone’s AniList favourites',
-        ].join('\n'),
+        name: '🎬 Discover',
+        value: ['`/find` · look up any movie or show', '`/recommend` · most-recommended leaderboard', '`/watchlater` · `/myfavorites` · your private lists'].join('\n'),
       },
-      { name: '💬 Other', value: '`/feedback` — rate AniTracker & tell the developer anything\n`/update` — post an update notice silently *(Manage Server)*' },
+      { name: '💬 Other', value: '`/feedback` · rate TV Tracker and tell the developer anything\n`/update` · post an update notice silently *(Manage Server)*' },
       {
-        name: '🔘 Buttons on activity posts',
+        name: '🔘 Buttons on posts',
         value: '⭐ Recommend · 🤍 Favorite · 📌 Watch later · ℹ️ More info (only you see it)\nReact to a post and its owner gets a private DM.',
       }
-    );
+    )
+    .setFooter({ text: 'Movies and TV only. Anime is not included.' });
   const invite = getInviteUrl();
   const components = invite
-    ? [new ActionRowBuilder().addComponents(new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel('Add AniTracker to a server').setURL(invite))]
+    ? [new ActionRowBuilder().addComponents(new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel('Add TV Tracker to a server').setURL(invite))]
     : [];
   await respond(interaction, { embeds: [embed], components, flags: EPHEMERAL });
 }
@@ -1115,14 +1146,14 @@ async function handleUpdate(interaction, guildData) {
   }
   const missing = missingChannelPerms(channel);
   if (missing.length) {
-    await respond(interaction, { content: `I can't post in <#${channel.id}> — missing **${missing.map(prettyPerm).join(', ')}**.`, flags: EPHEMERAL });
+    await respond(interaction, { content: `I can’t post in <#${channel.id}>. I’m missing **${missing.map(prettyPerm).join(', ')}**.`, flags: EPHEMERAL });
     return;
   }
 
   const embed = new EmbedBuilder().setColor(DEFAULT_COLOR).setTimestamp(new Date());
   if (custom) {
     embed
-      .setAuthor({ name: 'AniTracker update', iconURL: client.user.displayAvatarURL({ size: 64 }) })
+      .setAuthor({ name: 'TV Tracker update', iconURL: client.user.displayAvatarURL({ size: 64 }) })
       .setDescription(custom.replace(/\\n/g, '\n'))
       .setFooter({ text: `Posted by ${interaction.member?.displayName || interaction.user.username}` });
   } else {
@@ -1136,12 +1167,11 @@ async function handleUpdate(interaction, guildData) {
   try {
     await channel.send({
       embeds: [embed],
-      // @silent: shows normally, but no push notification or sound for anyone.
       flags: MessageFlags.SuppressNotifications,
       allowedMentions: { parse: [] },
     });
   } catch (e) {
-    await respond(interaction, { content: `Couldn't post: ${e.message}`, flags: EPHEMERAL });
+    await respond(interaction, { content: `Couldn’t post: ${e.message}`, flags: EPHEMERAL });
     return;
   }
   await respond(interaction, { content: `🔕 Posted ${custom ? 'your update' : 'the latest changelog'} silently in <#${channel.id}>.`, flags: EPHEMERAL });
@@ -1152,14 +1182,14 @@ async function handleFeedbackCommand(interaction) {
   const data = await loadData();
   const last = data.feedback.find((f) => f.userId === interaction.user.id);
   if (last && Date.now() - new Date(last.createdAt).getTime() < feedback.COOLDOWN_MS) {
-    await respond(interaction, { content: '⏳ You just sent feedback — give it a minute before sending more.', flags: EPHEMERAL });
+    await respond(interaction, { content: '⏳ You just sent feedback. Give it a minute before sending more.', flags: EPHEMERAL });
     return;
   }
   try {
     await interaction.showModal(feedback.buildFeedbackModal());
   } catch (e) {
     console.error('Failed to show feedback modal:', e.message);
-    await respond(interaction, { content: 'Couldn’t open the feedback form — please try again.', flags: EPHEMERAL });
+    await respond(interaction, { content: 'Couldn’t open the feedback form. Please try again.', flags: EPHEMERAL });
   }
 }
 
@@ -1189,39 +1219,102 @@ async function handleModalSubmit(interaction) {
 }
 
 /* ---------------------------------------------------------------------------
- * Buttons
+ * Title cards, posts and buttons
  * ------------------------------------------------------------------------- */
+function synopsisOf(title, max = 160) {
+  const text = (title.overview || '').replace(/\s+/g, ' ').trim();
+  return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
+}
+
+function buildInfoLine(title) {
+  const bits = [];
+  if (title.rating) bits.push(`⭐ ${title.rating.toFixed(1)}/10`);
+  if (title.genres?.length) bits.push(`🎭 ${title.genres.slice(0, 3).join(', ')}`);
+  return bits.join('  •  ');
+}
+
+// The public card for one title, used by /find and as a reusable result.
+function buildTitleCard(title, data, color) {
+  const embed = new EmbedBuilder()
+    .setColor(color || DEFAULT_COLOR)
+    .setAuthor({ name: title.kind === 'movie' ? '🎬 Movie' : '📺 TV show' })
+    .setTitle(`${title.title}${title.year ? ` (${title.year})` : ''}`)
+    .setURL(title.siteUrl);
+  const info = buildInfoLine(title);
+  const synopsis = synopsisOf(title);
+  embed.setDescription([info, synopsis].filter(Boolean).join('\n\n') || '*No description yet.*');
+  if (title.poster) embed.setImage(title.poster);
+  const rec = data ? recCountFor(data, title.key) : 0;
+  embed.setFooter({ text: rec ? `⭐ ${rec} ${rec === 1 ? 'recommendation' : 'recommendations'} · Data from Simkl` : 'Data from Simkl' });
+  return { embeds: [embed], components: [buildTitleButtons(title.key, rec)] };
+}
+
+function recCountFor(data, key) {
+  return data.globalRecommendations?.[key]?.recommendedBy?.length || 0;
+}
+
+function buildTitleButtons(key, recommendCount = 0) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`rec_${key}`).setLabel(recommendCount ? `Recommend (${recommendCount})` : 'Recommend').setEmoji('⭐').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`fav_${key}`).setLabel('Favorite').setEmoji('🤍').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`wl_${key}`).setLabel('Watch later').setEmoji('📌').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`info_${key}`).setLabel('More info').setEmoji('ℹ️').setStyle(ButtonStyle.Secondary)
+  );
+}
+
+function buildWatchEmbed(user, title, item, color) {
+  const embed = new EmbedBuilder().setTimestamp(new Date(item.watchedAt || Date.now()));
+  const authorOpts = { name: `${user.name} watched`, url: user.siteUrl || undefined };
+  if (user.avatar) authorOpts.iconURL = user.avatar;
+  embed.setAuthor(authorOpts);
+
+  const caption = title.kind === 'movie' ? '🎬 Watched' : '📺 Watched';
+  let progress = '';
+  if (title.kind === 'show' && item.watchedEpisodes) {
+    progress = item.totalEpisodes ? ` · ${item.watchedEpisodes} of ${item.totalEpisodes} episodes` : ` · ${item.watchedEpisodes} episodes`;
+  }
+  const headerLine = `# [${title.title}${title.year ? ` (${title.year})` : ''}](${title.siteUrl})`;
+  const parts = [`${caption}${progress}\n${headerLine}`];
+  const info = buildInfoLine(title);
+  if (info) parts.push(info);
+  const synopsis = synopsisOf(title);
+  if (synopsis) parts.push(synopsis);
+  embed.setDescription(parts.join('\n\n'));
+  embed.setColor(color || DEFAULT_COLOR).setFooter({ text: 'Data from Simkl' });
+  if (title.poster) embed.setImage(title.poster);
+  return embed;
+}
+
 async function handleButton(interaction) {
   const { customId } = interaction;
   if (customId === 'trk_on' || customId === 'trk_off') return handleTrackingButton(interaction, customId === 'trk_on');
 
   if (!interaction.guildId) return;
-  const [action, idStr] = customId.split('_');
-  const mediaId = parseInt(idStr, 10);
-  if (!mediaId || !['wl', 'rec', 'fav', 'info'].includes(action)) return;
+  const [action, kind, idStr] = customId.split('_');
+  const key = `${kind}_${idStr}`;
+  if (!['wl', 'fav', 'rec', 'info'].includes(action) || !parseKey(key)) return;
 
-  // Ack Discord's 3s window first. If that fails the interaction is gone.
   if (!(await safeDefer(interaction, true))) return;
 
   const data = await loadData();
   const guildData = ensureGuildData(data, interaction.guildId);
 
   try {
-    if (action === 'wl') await handleListToggleButton(interaction, data, mediaId, 'watchlist');
-    else if (action === 'fav') await handleListToggleButton(interaction, data, mediaId, 'favorites');
-    else if (action === 'rec') await handleRecommendButton(interaction, data, guildData, mediaId);
-    else if (action === 'info') await handleMoreInfoButton(interaction, mediaId);
+    if (action === 'wl') await handleListToggleButton(interaction, data, key, 'watchlist');
+    else if (action === 'fav') await handleListToggleButton(interaction, data, key, 'favorites');
+    else if (action === 'rec') await handleRecommendButton(interaction, data, guildData, key);
+    else if (action === 'info') await handleMoreInfoButton(interaction, key);
   } catch (err) {
     console.error(`Error handling button ${customId}:`, err);
     await respond(interaction, { content: 'Something went wrong. Try again in a bit.' });
   }
 }
 
-// Watch later + Favorite share one toggle implementation; lists are per person.
-async function handleListToggleButton(interaction, data, mediaId, field) {
+// Watch later and Favorite share one toggle. Lists are per person.
+async function handleListToggleButton(interaction, data, key, field) {
   const list = ensureUserLists(data, interaction.user.id)[field];
   const isWatch = field === 'watchlist';
-  const existingIndex = list.findIndex((e) => e.mediaId === mediaId);
+  const existingIndex = list.findIndex((e) => e.key === key);
 
   if (existingIndex !== -1) {
     const [removed] = list.splice(existingIndex, 1);
@@ -1232,82 +1325,84 @@ async function handleListToggleButton(interaction, data, mediaId, field) {
     return;
   }
 
-  const media = await getMediaById(mediaId).catch(() => null);
-  if (!media) {
-    await respond(interaction, { content: "⚠️ Couldn't reach AniList to save that (AniList-side hiccup). Try again in a bit." });
+  const title = await fetchTitle(key).catch(() => null);
+  if (!title) {
+    await respond(interaction, { content: '⚠️ Couldn’t reach Simkl to save that. Try again in a bit.' });
     return;
   }
-  const title = titleOf(media);
-  list.push({ mediaId, title, siteUrl: media.siteUrl, cover: media.coverImage?.medium || null, addedAt: new Date().toISOString() });
+  list.push({ key, title: title.title, year: title.year, siteUrl: title.siteUrl, cover: title.poster, addedAt: new Date().toISOString() });
   await saveData(data);
   await respond(interaction, {
     content: isWatch
-      ? `📌 Added **${title}** to your watch later list (${list.length} total) — see it with \`/watchlater\`.`
-      : `🤍 Added **${title}** to your favorites (${list.length} total) — see them with \`/myfavorites\`.`,
+      ? `📌 Added **${title.title}** to your watch later list (${list.length} total). See it with \`/watchlater\`.`
+      : `🤍 Added **${title.title}** to your favorites (${list.length} total). See them with \`/myfavorites\`.`,
   });
 }
 
-async function handleRecommendButton(interaction, data, guildData, mediaId) {
+async function handleRecommendButton(interaction, data, guildData, key) {
   const userId = interaction.user.id;
-  if (!guildData.recommendations[mediaId]) guildData.recommendations[mediaId] = { title: null, siteUrl: null, recommendedBy: [] };
-  const rec = guildData.recommendations[mediaId];
+  if (!guildData.recommendations[key]) guildData.recommendations[key] = { title: null, year: null, siteUrl: null, recommendedBy: [] };
+  const rec = guildData.recommendations[key];
   const alreadyRecommended = rec.recommendedBy.includes(userId);
 
   if (alreadyRecommended) {
     rec.recommendedBy = rec.recommendedBy.filter((id) => id !== userId);
   } else {
     if (!rec.title) {
-      const media = await getMediaById(mediaId).catch(() => null);
-      if (media) {
-        rec.title = titleOf(media);
-        rec.siteUrl = media.siteUrl;
+      const title = await fetchTitle(key).catch(() => null);
+      if (title) {
+        rec.title = title.title;
+        rec.year = title.year;
+        rec.siteUrl = title.siteUrl;
       }
     }
     rec.recommendedBy.push(userId);
   }
 
-  // Global tally — one vote per user per anime across all servers. A vote
-  // only leaves the global tally once it's removed in EVERY server.
-  if (!data.globalRecommendations[mediaId]) {
-    data.globalRecommendations[mediaId] = { title: rec.title, siteUrl: rec.siteUrl, recommendedBy: [] };
+  // Global tally: one vote per person per title. A vote leaves it only when removed in every server.
+  if (!data.globalRecommendations[key]) {
+    data.globalRecommendations[key] = { title: rec.title, year: rec.year, siteUrl: rec.siteUrl, recommendedBy: [] };
   }
-  const globalRec = data.globalRecommendations[mediaId];
+  const globalRec = data.globalRecommendations[key];
   if (rec.title) {
     globalRec.title = rec.title;
+    globalRec.year = rec.year;
     globalRec.siteUrl = rec.siteUrl;
   }
   if (alreadyRecommended) {
-    const stillElsewhere = Object.values(data.guilds).some((g) => g.recommendations?.[mediaId]?.recommendedBy?.includes(userId));
+    const stillElsewhere = Object.values(data.guilds).some((g) => g.recommendations?.[key]?.recommendedBy?.includes(userId));
     if (!stillElsewhere) globalRec.recommendedBy = globalRec.recommendedBy.filter((id) => id !== userId);
   } else if (!globalRec.recommendedBy.includes(userId)) {
     globalRec.recommendedBy.push(userId);
   }
   await saveData(data);
 
-  // Refresh the count on the button + footer, keeping the post's More Info target.
+  // Refresh the count on the button and footer.
   try {
     const newCount = rec.recommendedBy.length;
-    const infoId = findInfoIdOnMessage(interaction.message) || mediaId;
-    const editPayload = { components: [buildActivityButtons(mediaId, infoId, newCount)] };
+    const editPayload = { components: [buildTitleButtons(key, newCount)] };
     const existingEmbed = interaction.message.embeds[0];
-    if (existingEmbed) editPayload.embeds = [EmbedBuilder.from(existingEmbed).setFooter({ text: buildFooterText(newCount) })];
+    if (existingEmbed) {
+      const footerText = existingEmbed.footer?.text?.replace(/^⭐ \d+ .*? · /, '') || 'Data from Simkl';
+      editPayload.embeds = [EmbedBuilder.from(existingEmbed).setFooter({ text: newCount ? `⭐ ${newCount} ${newCount === 1 ? 'recommendation' : 'recommendations'} · ${footerText}` : footerText })];
+    }
     await interaction.message.edit(editPayload);
   } catch (e) {
     console.error('Failed to update recommend display:', e.message);
   }
 
-  // DM the post's owner on a fresh recommend (not a removal).
+  // DM the post's owner on a fresh recommend.
   if (!alreadyRecommended) {
     const postInfo = guildData.recentPosts[interaction.message.id];
-    const ownerId = postInfo ? profileOwnerId(data, postInfo.anilistId, postInfo.addedBy) : null;
+    const ownerId = postInfo?.discordId;
     if (ownerId && ownerId !== userId) {
       const owner = await client.users.fetch(ownerId).catch(() => null);
       if (owner) {
-        const animeName = rec.title || postInfo.animeTitle || 'an anime';
+        const name = rec.title || postInfo.title || 'a title';
         const embed = new EmbedBuilder()
           .setColor(interaction.message.embeds[0]?.color ?? RECOMMEND_EMBED_COLOR)
           .setAuthor({ name: `${interaction.user.displayName || interaction.user.username} recommended it ⭐`, iconURL: interaction.user.displayAvatarURL({ size: 64 }) })
-          .setDescription(`<@${userId}> recommended **${rec.siteUrl ? `[${animeName}](${rec.siteUrl})` : animeName}** that you were watching!\n\n🏠 **${interaction.guild.name}**`)
+          .setDescription(`<@${userId}> recommended **${rec.siteUrl ? `[${name}](${rec.siteUrl})` : name}** after your watch!\n\n🏠 **${interaction.guild.name}**`)
           .setFooter({ text: interaction.guild.name, iconURL: interaction.guild.iconURL({ size: 64 }) || undefined })
           .setTimestamp(new Date());
         const cover = postInfo?.cover || interaction.message.embeds[0]?.image?.url;
@@ -1321,293 +1416,28 @@ async function handleRecommendButton(interaction, data, guildData, mediaId) {
   }
 
   await respond(interaction, {
-    content: alreadyRecommended ? 'Removed your recommendation.' : `Thanks for recommending **${rec.title || 'this'}**! ⭐ See the leaderboard with \`/recommendanimes\`.`,
+    content: alreadyRecommended ? 'Removed your recommendation.' : `Thanks for recommending **${rec.title || 'this'}**! ⭐ See the leaderboard with \`/recommend\`.`,
   });
 }
 
-function findInfoIdOnMessage(message) {
-  for (const row of message?.components || []) {
-    for (const c of row.components || []) {
-      if (c.customId?.startsWith('info_')) return parseInt(c.customId.split('_')[1], 10) || null;
-    }
-  }
-  return null;
-}
-
-/* ----- More Info ----- */
-async function getMediaDetailsCached(mediaId) {
-  const hit = mediaDetailsCache.get(mediaId);
-  if (hit && Date.now() - hit.at < MEDIA_DETAILS_TTL_MS) return hit.media;
-  const media = await getMediaDetails(mediaId);
-  if (media) boundedSet(mediaDetailsCache, mediaId, { at: Date.now(), media });
-  return media;
-}
-
-// Walks the franchise forward from its root along SEQUEL links and returns
-// the ordered list of TV-style entries (TV / TV Short / ONA) — i.e. "seasons".
-// Movies/OVAs between seasons are passed through but not counted.
-async function getFranchiseSeasonIds(rootId) {
-  if (franchiseCache.has(rootId)) return franchiseCache.get(rootId);
-  const ids = [];
-  const visited = new Set();
-  let cursor = rootId;
-  for (let hop = 0; hop < MAX_FRANCHISE_HOPS && cursor && !visited.has(cursor); hop++) {
-    visited.add(cursor);
-    const media = await getMediaRelations(cursor).catch(() => null);
-    if (!media) break;
-    if (media.type === 'ANIME' && TV_FORMATS.has(media.format)) ids.push(media.id);
-    const sequels = (media.relations?.edges || []).filter((e) => e.relationType === 'SEQUEL' && e.node?.type === 'ANIME');
-    const next = sequels.find((e) => TV_FORMATS.has(e.node.format)) || sequels[0];
-    cursor = next?.node?.id;
-  }
-  boundedSet(franchiseCache, rootId, ids);
-  return ids;
-}
-
-async function handleMoreInfoButton(interaction, mediaId) {
-  let media;
-  try {
-    media = await getMediaDetailsCached(mediaId);
-  } catch (e) {
-    console.error('More Info lookup failed:', e.message);
-  }
-  if (!media) {
-    await respond(interaction, { content: '⚠️ AniList isn’t responding right now (this is on AniList’s side). Try again in a bit.' });
+async function handleMoreInfoButton(interaction, key) {
+  const title = await fetchTitle(key).catch(() => null);
+  if (!title) {
+    await respond(interaction, { content: simklDownMessage });
     return;
   }
-
-  let seasonNumber = null;
-  let totalSeasons = null;
-  if (media.type === 'ANIME') {
-    try {
-      const { rootId } = await resolveSeasonInfo(mediaId, titleOf(media), media.siteUrl, media.type);
-      const seasonIds = await getFranchiseSeasonIds(rootId);
-      if (seasonIds.length) {
-        totalSeasons = seasonIds.length;
-        const idx = seasonIds.indexOf(mediaId);
-        seasonNumber = idx === -1 ? null : idx + 1;
-      }
-    } catch (e) {
-      console.error('Season count failed:', e.message);
-    }
-  }
-
-  await respond(interaction, buildMoreInfo(media, { seasonNumber, totalSeasons }));
+  const color = await getDominantColor(title.poster).catch(() => DEFAULT_COLOR);
+  const panel = buildMoreInfo(title, { color });
+  await respond(interaction, { ...panel, flags: EPHEMERAL });
 }
 
 /* ---------------------------------------------------------------------------
- * Activity post building
- * ------------------------------------------------------------------------- */
-function buildActivityButtons(rootId, infoMediaId, recommendCount = 0) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`rec_${rootId}`)
-      .setLabel(recommendCount ? `Recommend • ${recommendCount}` : 'Recommend')
-      .setEmoji('⭐')
-      .setStyle(ButtonStyle.Primary),
-    // Discord has no pink button colour — Danger (red) is the closest.
-    new ButtonBuilder().setCustomId(`fav_${rootId}`).setLabel('Favorite').setEmoji('🤍').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId(`wl_${rootId}`).setLabel('Watch later').setEmoji('📌').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`info_${infoMediaId || rootId}`).setLabel('More Info').setEmoji('ℹ️').setStyle(ButtonStyle.Secondary)
-  );
-}
-
-function buildFooterText(recommendCount) {
-  if (recommendCount > 0) return `Recommended by ${recommendCount} ${recommendCount === 1 ? 'person' : 'people'} • AniList`;
-  return 'AniList';
-}
-
-function statusEmoji(status) {
-  const s = (status || '').toLowerCase();
-  if (s.includes('complet')) return '✅';
-  if (s.includes('drop')) return '🗑️';
-  if (s.includes('paus')) return '⏸️';
-  if (s.includes('plan')) return '📌';
-  if (s.includes('rewatch') || s.includes('reread')) return '🔁';
-  if (s.includes('watch')) return '▶️';
-  if (s.includes('read')) return '📖';
-  return '📺';
-}
-
-function statusVerbShort(status) {
-  const s = (status || '').toLowerCase();
-  if (s.includes('complet')) return 'Completed';
-  if (s.includes('drop')) return 'Dropped';
-  if (s.includes('paus')) return 'Paused';
-  if (s.includes('plan')) return s.includes('read') ? 'Plans to read' : 'Plans to watch';
-  if (s.includes('rewatch')) return 'Rewatched';
-  if (s.includes('reread')) return 'Reread';
-  if (s.includes('watch')) return 'Watched';
-  if (s.includes('read')) return 'Read';
-  return capitalize(s) || 'Updated';
-}
-
-function capitalize(s) {
-  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
-}
-
-function getPopularityRank(rankings) {
-  if (!rankings) return null;
-  const entry = rankings.find((r) => r.type === 'POPULAR' && r.allTime);
-  if (!entry || entry.rank > 100) return null;
-  return entry.rank;
-}
-
-// Walks AniList's PREQUEL chain to the franchise root (e.g. Season 1).
-// Everything downstream (title link, Watch Later, Recommend) keys on the
-// root, so seasons consolidate. Season number counts TV-style entries only,
-// so a movie between seasons doesn't shift "season 2" to "season 3".
-async function resolveSeasonInfo(mediaId, fallbackTitle, fallbackSiteUrl, mediaType) {
-  if (seasonCache.has(mediaId)) return seasonCache.get(mediaId);
-
-  let tvCount = 0;
-  let currentIsTv = false;
-  let rootId = mediaId;
-  let rootTitle = fallbackTitle;
-  let rootSiteUrl = fallbackSiteUrl;
-  let rootRankings = null;
-  let lookupFailed = false;
-
-  let cursorId = mediaId;
-  for (let hop = 0; hop < MAX_SEASON_HOPS; hop++) {
-    const media = await getMediaRelations(cursorId).catch(() => null);
-    if (!media) {
-      lookupFailed = hop === 0;
-      break;
-    }
-    if (hop === 0) {
-      rootRankings = media.rankings || null;
-      currentIsTv = media.type === 'ANIME' && TV_FORMATS.has(media.format);
-      if (currentIsTv) tvCount = 1;
-    }
-    const type = media.type || mediaType;
-    const prequel = (media.relations?.edges || []).find((e) => e.relationType === 'PREQUEL' && (!type || e.node?.type === type));
-    if (!prequel) break;
-
-    if (TV_FORMATS.has(prequel.node.format)) tvCount += 1;
-    rootId = prequel.node.id;
-    rootTitle = prequel.node.title?.english || prequel.node.title?.romaji || rootTitle;
-    rootSiteUrl = prequel.node.siteUrl || rootSiteUrl;
-    rootRankings = prequel.node.rankings || null;
-    cursorId = prequel.node.id;
-  }
-
-  const result = {
-    season: currentIsTv && tvCount > 1 ? tvCount : null,
-    rootId,
-    rootTitle,
-    rootSiteUrl,
-    popularityRank: getPopularityRank(rootRankings),
-  };
-  // Don't cache a result that only exists because AniList was down.
-  if (!lookupFailed) boundedSet(seasonCache, mediaId, result);
-  return result;
-}
-
-function stripMarkup(text) {
-  return (text || '')
-    .replace(/img\d*\(.*?\)/g, '')
-    .replace(/webm\(.*?\)/g, '')
-    .replace(/youtube\(.*?\)/g, '')
-    .replace(/~!.*?!~/gs, '')
-    .replace(/[_*~`]/g, '')
-    .trim();
-}
-
-function stripDescription(text) {
-  if (!text) return '';
-  return text
-    .replace(/~!.*?!~/gs, '')
-    .replace(/<br\s*\/?>/gi, ' ')
-    .replace(/<\/?[a-z][^>]*>/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function truncate(text, max) {
-  if (!text) return '';
-  return text.length > max ? `${text.slice(0, max).trimEnd()}…` : text;
-}
-
-// "season 2, episode 5" / "episodes 3 - 5" / "chapter 120"
-function progressText(activity, season) {
-  const isManga = activity.media?.type === 'MANGA';
-  const parts = [];
-  if (season && !isManga) parts.push(`season ${season}`);
-  if (activity.progress) {
-    const range = String(activity.progress).includes('-');
-    const unit = isManga ? (range ? 'chapters' : 'chapter') : range ? 'episodes' : 'episode';
-    parts.push(`${unit} ${activity.progress}`);
-  }
-  return parts.join(', ');
-}
-
-async function buildEmbed(username, avatarUrl, activity, streak, seasonInfo) {
-  const embed = new EmbedBuilder().setTimestamp(new Date(activity.createdAt * 1000));
-  const authorOpts = { name: `✦ ${username} 🔥 ${streak || 1}`, url: `https://anilist.co/user/${encodeURIComponent(username)}` };
-  if (avatarUrl) authorOpts.iconURL = avatarUrl;
-  embed.setAuthor(authorOpts);
-
-  if (activity.__typename === 'ListActivity' && activity.media) {
-    const { season, rootTitle, rootSiteUrl, popularityRank } = seasonInfo;
-    const progress = progressText(activity, season);
-    const verb = statusVerbShort(activity.status);
-    const captionLine = `${progress ? `${verb} ${progress}` : verb} ${statusEmoji(activity.status)}`;
-    // "# " header renders bigger than Title and doesn't force an underline.
-    const headerLine = `# [${rootTitle}](${rootSiteUrl})`;
-
-    const cover = activity.media.coverImage || {};
-    const displayImage = cover.extraLarge || cover.large || cover.medium;
-    const color = await getDominantColor(cover.medium || cover.large || displayImage);
-
-    const infoBits = [];
-    if (typeof activity.media.averageScore === 'number') infoBits.push(`⭐ ${(activity.media.averageScore / 10).toFixed(1)}/10`);
-    if (activity.media.genres?.length) infoBits.push(`🎭 ${activity.media.genres.slice(0, 3).join(', ')}`);
-    if (activity.media.isAdult) infoBits.push('🔞 Mature');
-    if (popularityRank) infoBits.push(`❤️ #${popularityRank} Most Popular`);
-    const infoLine = infoBits.join('  •  ');
-
-    const synopsis = truncate(stripDescription(activity.media.description), 160);
-    const descParts = [`${captionLine}\n${headerLine}`];
-    if (infoLine) descParts.push(infoLine);
-    if (synopsis) descParts.push(synopsis);
-    embed.setDescription(descParts.join('\n\n'));
-
-    embed.setColor(color).setFooter({ text: buildFooterText(0) });
-    if (displayImage) embed.setImage(displayImage);
-  } else if (activity.__typename === 'TextActivity') {
-    embed
-      .setColor(DEFAULT_COLOR)
-      .setTitle('💬 Posted a status update')
-      .setURL(activity.siteUrl)
-      .setDescription(truncate(stripMarkup(activity.text), 300) || '*(image or media post)*')
-      .setFooter({ text: 'AniList' });
-  } else if (activity.__typename === 'MessageActivity') {
-    embed
-      .setColor(DEFAULT_COLOR)
-      .setTitle('💬 Posted a message')
-      .setURL(activity.siteUrl)
-      .setDescription(truncate(stripMarkup(activity.message), 300) || '*(image or media post)*')
-      .setFooter({ text: 'AniList' });
-  } else {
-    embed
-      .setColor(DEFAULT_COLOR)
-      .setTitle('📺 New AniList activity')
-      .setURL(`https://anilist.co/user/${encodeURIComponent(username)}`)
-      .setFooter({ text: 'AniList' });
-  }
-  return embed;
-}
-
-/* ---------------------------------------------------------------------------
- * Poller
+ * Poller: check each signed-in, tracked person and post new watches
  * ------------------------------------------------------------------------- */
 async function pollAllGuilds() {
   if (isPaused || !client.isReady()) return;
-  // If a poll is still running (slow AniList), don't start a second one on
-  // top of it — overlapping polls used to double-post the same activity.
   if (pollRunning) {
-    console.warn('Previous poll still running — skipping this tick.');
+    console.warn('Previous poll still running, skipping this tick.');
     return;
   }
   pollRunning = true;
@@ -1624,12 +1454,17 @@ async function pollAllGuilds() {
 }
 
 async function pollOnce() {
+  if (!simkl.isConfigured()) return;
   const data = await loadData();
-  // Same AniList profile tracked in several servers → fetch it once per poll.
-  const activityCache = new Map();
-  const fetchActivities = (anilistId) => {
-    if (!activityCache.has(anilistId)) activityCache.set(anilistId, getRecentActivities(anilistId, 10));
-    return activityCache.get(anilistId);
+
+  // Same person tracked in several servers: check Simkl once per poll.
+  const libraryCache = new Map();
+  const libraryFor = (discordId, token) => {
+    if (!libraryCache.has(discordId)) libraryCache.set(discordId, (async () => {
+      const activity = await simkl.getActivities(token);
+      return { activity, library: null };
+    })());
+    return libraryCache.get(discordId);
   };
 
   let changed = false;
@@ -1638,7 +1473,7 @@ async function pollOnce() {
     if (isPaused) break;
     const guildData = ensureGuildData(data, guildId);
     if (!guildData.channelId || !guildData.users.length) continue;
-    if (!client.guilds.cache.has(guildId)) continue; // bot was removed from this server
+    if (!client.guilds.cache.has(guildId)) continue;
 
     const channel = await client.channels.fetch(guildData.channelId).catch(() => null);
     if (!channel) continue;
@@ -1646,69 +1481,74 @@ async function pollOnce() {
     if (missing.length) {
       if (!warnedChannels.has(channel.id)) {
         warnedChannels.add(channel.id);
-        console.warn(`Can't post in #${channel.name} (${guildId}) — missing ${missing.join(', ')}. Skipping until fixed.`);
+        console.warn(`Can't post in #${channel.name} (${guildId}), missing ${missing.join(', ')}. Skipping until fixed.`);
       }
       continue;
     }
     warnedChannels.delete(channel.id);
 
     for (const user of [...guildData.users]) {
-      if (isOptedOut(data, user.id)) continue; // owner turned live activity off
-      try {
-        const activities = await fetchActivities(user.id);
-        const newOnes = activities.filter((a) => a.id > (user.lastActivityId || 0)).sort((a, b) => a.id - b.id);
-        if (!newOnes.length) continue;
-
-        // Daily streak (UTC days), once per poll batch.
-        const today = new Date().toISOString().slice(0, 10);
-        if (user.lastActivityDate !== today) {
-          const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-          user.streak = user.lastActivityDate === yesterday ? (user.streak || 0) + 1 : 1;
-          user.lastActivityDate = today;
+      if (isOptedOut(data, user.discordId)) continue;
+      const account = data.linkedAccounts[user.discordId];
+      if (!account?.token) {
+        if (!warnedUnlinked.has(user.discordId)) {
+          warnedUnlinked.add(user.discordId);
+          console.warn(`${user.name} is tracked but isn't signed in. They need /signin again.`);
         }
+        continue;
+      }
+      warnedUnlinked.delete(user.discordId);
 
-        for (const activity of newOnes) {
-          let seasonInfo = null;
-          if (activity.__typename === 'ListActivity' && activity.media) {
-            seasonInfo = await resolveSeasonInfo(activity.media.id, titleOf(activity.media), activity.media.siteUrl, activity.media.type);
-            const key = String(seasonInfo.rootId);
-            const entry = data.watchStats[key] || { title: seasonInfo.rootTitle, siteUrl: seasonInfo.rootSiteUrl, count: 0 };
-            entry.count += 1;
-            entry.title = seasonInfo.rootTitle;
-            entry.siteUrl = seasonInfo.rootSiteUrl;
-            data.watchStats[key] = entry;
-          }
+      try {
+        const cached = await libraryFor(user.discordId, account.token);
+        const activity = cached.activity;
+        // Nothing changed on Simkl since last time: skip the heavier library lookup.
+        if (user.stamps && user.stamps.movies === activity.movies && user.stamps.shows === activity.shows) continue;
 
-          const embed = await buildEmbed(user.username, user.avatar, activity, user.streak, seasonInfo);
-          const components = seasonInfo ? [buildActivityButtons(seasonInfo.rootId, activity.media.id, 0)] : [];
+        if (!cached.library) cached.library = await loadLibrary(account.token);
+        const library = cached.library;
 
+        if (!user.watchedAt) user.watchedAt = simkl.latestWatch(library) || new Date().toISOString();
+        const fresh = simkl.newWatches(library, user.watchedAt);
+
+        for (const item of fresh) {
+          const title = await fetchTitle(item.key).catch(() => null);
+          const display = title || { ...item, siteUrl: item.siteUrl };
+          const color = await getDominantColor(display.poster).catch(() => DEFAULT_COLOR);
+          const embed = buildWatchEmbed({ ...user, avatar: account.avatar, siteUrl: account.siteUrl }, display, item, color);
           const sentMessage = await channel.send({
             content: user.addedBy ? `<@${user.addedBy}>` : undefined,
             embeds: [embed],
-            components,
+            components: [buildTitleButtons(item.key, recCountFor(data, item.key))],
             allowedMentions: user.addedBy ? { users: [user.addedBy] } : { parse: [] },
-            // Quiet ping: shows the mention, no push notification/sound.
+            // Quiet ping: the mention shows, but without a push notification.
             flags: user.addedBy ? MessageFlags.SuppressNotifications : undefined,
           });
 
           guildData.recentPosts[sentMessage.id] = {
+            discordId: user.discordId,
             addedBy: user.addedBy || null,
-            anilistId: user.id,
-            animeTitle: seasonInfo ? seasonInfo.rootTitle : null,
-            siteUrl: seasonInfo ? seasonInfo.rootSiteUrl : null,
-            mediaId: activity.media?.id || null,
-            cover: activity.media?.coverImage?.large || activity.media?.coverImage?.medium || null,
+            title: display.title,
+            siteUrl: display.siteUrl,
+            key: item.key,
+            cover: display.poster || null,
           };
-          // Advance per activity, so a failure halfway never re-posts the earlier ones.
-          user.lastActivityId = Math.max(user.lastActivityId || 0, activity.id);
+          // Advance per watch, so a failure halfway never re-posts earlier ones.
+          user.watchedAt = user.watchedAt && Date.parse(user.watchedAt) > Date.parse(item.watchedAt) ? user.watchedAt : item.watchedAt;
           changed = true;
         }
+
+        user.stamps = { movies: activity.movies, shows: activity.shows };
+        changed = true;
       } catch (e) {
-        console.error(`Failed polling ${user.username}:`, e.message);
+        if (e.status === 401) {
+          console.warn(`Simkl rejected ${user.name}'s sign-in. They need /signin again.`);
+        } else {
+          console.error(`Failed polling ${user.name}:`, e.message);
+        }
       }
     }
 
-    // Keep recentPosts bounded (insertion order is chronological).
     const postKeys = Object.keys(guildData.recentPosts);
     if (postKeys.length > MAX_RECENT_POSTS) {
       for (const k of postKeys.slice(0, postKeys.length - MAX_RECENT_POSTS)) delete guildData.recentPosts[k];
@@ -1724,22 +1564,21 @@ async function pollOnce() {
  * ------------------------------------------------------------------------- */
 (async () => {
   if (!process.env.DISCORD_TOKEN) {
-    console.error('DISCORD_TOKEN is not set — cannot log in.');
+    console.error('DISCORD_TOKEN is not set. Cannot log in.');
     return;
   }
-  await loadData(); // warm the in-memory store before anything can touch it
+  await loadData();
   await recordBoot();
   try {
     await client.login(process.env.DISCORD_TOKEN);
   } catch (e) {
     console.error('Discord login failed:', e.message);
-    // Exit so Render restarts us instead of sitting there half-alive.
     await flushData();
     process.exit(1);
   }
 })();
 
-// Exposed only so the handlers can be exercised in isolation; unused at runtime.
+// Exposed only so the handlers can be exercised in isolation.
 module.exports = {
-  _internals: { client, app, handleSlashCommand, handleButton, handleModalSubmit, handleSelectMenu, pollOnce, buildEmbed, resolveSeasonInfo, getFranchiseSeasonIds },
+  _internals: { client, app, handleSlashCommand, handleButton, handleModalSubmit, handleSelectMenu, pollOnce, buildWatchEmbed, buildTitleCard },
 };

@@ -1,13 +1,14 @@
 {
-  "name": "anilist-discord-bot",
+  "name": "tv-tracker-discord-bot",
   "version": "1.0.0",
-  "description": "Discord bot that posts AniList activity feed updates to a channel",
+  "description": "Discord bot that posts movie and TV watch activity from Simkl",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
     "start": "node index.js",
     "deploy-commands": "node deploy-commands.js",
-    "check": "node --check changelog.js && node --check commands.js && node --check index.js && node --check storage.js && node --check anilist.js && node --check oauth.js && node --check moreInfo.js && node --check feedback.js && node --check deploy-commands.js && node --check dashboard/routes.js"
+    "check": "node --check changelog.js && node --check commands.js && node --check index.js && node --check storage.js && node --check simkl.js && node --check moreInfo.js && node --check feedback.js && node --check deploy-commands.js && node --check dashboard/routes.js && node --test tests/*.test.js",
+    "test": "node --test tests/*.test.js"
   },
   "dependencies": {
     "@upstash/redis": "^1.38.2",

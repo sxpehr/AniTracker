@@ -1,4 +1,47 @@
-# AniTracker — November update
+# AniTracker — Profiles, Customization & Reviews update
+
+Nothing to configure: push and Render deploys it. Slash commands register themselves on startup.
+Everything below is **opt-in**. Anyone who never opens `/settings` sees the same activity posts as before.
+
+## New commands
+| Command | What it does |
+|---|---|
+| `/profile [user]` | Interactive anime profile with tabs: Overview · Favorites · Reviews · Recs · Collections · Stats · Activity |
+| `/settings [section]` | The customization studio: Appearance, Profile, Showcase, Activity posts, Privacy, Stats & reviews, Server |
+| `/review write · read · browse` | Write reviews in Discord, read them by anime, discover the newest, most helpful, highest rated, this server's, or your own |
+| `/collection view · add · create · manage` | Favorites, Watch Later, Recommendations, In Rotation and custom lists |
+| `/recommend anime [message]` | Recommend an anime with a personal note |
+| `/stats [user]` | This month (with a 6-month sparkline), lifetime (from AniList), and streaks (with a heatmap) |
+| `/recap [month] [user] [private]` | Shareable monthly recap with your #1 anime's banner |
+| `/leaderboard [category]` | Server boards. Managers choose which ones in `/settings` → Server |
+
+`/myfavorites` and `/watchlater` now open the full list managers (reorder, notes, feature, mark started).
+
+## How it's built (and why it looks different from embeds)
+- **Components V2.** Profiles, settings, reviews and stats use Discord's newer layout system instead of embeds. It allows real cover galleries (up to 10), thumbnails beside text, dividers, and buttons and menus inside the card. Every message is checked against Discord's limits (40 components, 4,000 characters). If a profile has more sections switched on than fit, whole sections drop from the bottom (they're still on the tabs) instead of the message failing.
+- **Painted banners.** Discord cards can't have a background colour, so each theme also paints a banner image from its colours: a gradient with a glow, orbit rings and ✦ sparkles. The bot serves it from its own URL (`/banner/...`), so Discord fetches it once and caches it. The "Featured anime" banner uses that anime's AniList banner tinted with your theme.
+- **Menus are AniList blue.** Settings, list managers, search results and leaderboards use the AniList-blue accent (#3DB4F2). Profiles, reviews and recaps use the owner's own theme colour.
+- **Draft + live preview.** In `/settings`, every change goes into a draft and the preview card underneath updates instantly. Nothing applies until **Save**, and **Discard** undoes it. Activity posts get their own **📡 Preview a post** button.
+- **Favorite Anime Opening.** You search for the anime, then pick its OP from the list on AnimeThemes (song, artist, episodes). The profile shows it with a ▶️ Play button. If AnimeThemes doesn't have it, you can type it in.
+- **Activity post buttons** are now two rows: 💜 Recommend · ❤️ Like · ⭐ Favorite · 📌 Watch later / ✍️ Review · ➕ Save to list · 📊 More info. Old posts switch to the new buttons the next time someone clicks Recommend on them.
+- **Stats** are recorded by the poller once per AniList account. That includes people who signed in with `/signin` but aren't tracked anywhere. Duplicate logs aren't double-counted, and "completed" fills in the final episodes. Lifetime totals come straight from AniList, so nothing is duplicated. Streaks follow each person's time zone (set in `/settings`, default Toronto).
+- **Storage:** profiles and reviews live in a new Redis key `anitracker:social`, and watch history in `anitracker:stats`. That keeps each write small. Existing Watch Later and Favorites lists were moved over automatically.
+
+## Checklist (✅ covered by the automated run: 119 messages validated against Discord's limits)
+- ✅ Default profile and onboarding nudge for people who haven't customized
+- ✅ Settings: all 7 categories, theme, custom hex colours (with validation), 4 banner modes, text form, featured anime (from favorites or search), favorite opening, showcase sections + 4 layouts, post style / colour / details, privacy, time zone, recap DM, spoiler default, server leaderboards, save, discard, previews
+- ✅ Lists: add from posts, paging, reorder, notes, feature, remove, custom collections (create, edit, delete), "save to lists" multi-select, Watch Later → started → In Rotation, rotation pins and hides
+- ✅ Recommend button + `/recommend` with a message, ❤️ Like, bookmarking someone's rec into your Watch Later
+- ✅ Reviews: form from the post button, spoiler hiding, helpful votes (not your own), 5 browse sorts, read by anime with community score, share, feature, delete
+- ✅ Stats engine (ranges, duplicates, completions, rewatches, streaks), `/stats` tabs, `/recap`, leaderboards respecting server config and privacy
+- ✅ Profile with everything on, all 7 tabs, private copies when someone clicks your public profile, privacy (hidden parts, private profile)
+- ✅ Autocomplete (anime search, months), monthly recap DMs, banner endpoint
+- 🔲 Check live: how banners and cover galleries look in your Discord client (desktop and mobile)
+- 🔲 Check live: the AnimeThemes opening list for a couple of shows
+
+---
+
+# Previous update — November (stability, sign-in, feedback)
 
 ## What you need to do (in order)
 

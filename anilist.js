@@ -81,6 +81,8 @@ async function getRecentActivities(userId, perPage = 10) {
               averageScore
               genres
               isAdult
+              episodes
+              duration
             }
           }
           ... on TextActivity {
@@ -262,6 +264,7 @@ async function getViewer(token) {
 }
 
 module.exports = {
+  anilistQuery,
   getUserByName,
   getRecentActivities,
   getMediaById,

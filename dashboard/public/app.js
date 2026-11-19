@@ -203,6 +203,8 @@ async function renderOverview() {
     ['Servers', data.totalServers],
     ['Tracked Users', data.totalTrackedUsers],
     ['Linked Accounts', data.linkedAccounts ?? 0],
+    ['Custom Profiles', data.profiles ?? 0],
+    ['Reviews', data.reviews ?? 0],
     ['Recommend Votes', data.totalRecommendations],
     ['Pending Feedback', data.pendingFeedback ?? 0],
     ['Uptime', formatUptime(data.uptimeSeconds)],

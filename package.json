@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node index.js",
     "deploy-commands": "node deploy-commands.js",
-    "check": "node --check changelog.js && node --check commands.js && node --check index.js && node --check storage.js && node --check anilist.js && node --check oauth.js && node --check moreInfo.js && node --check feedback.js && node --check deploy-commands.js && node --check dashboard/routes.js"
+    "check": "node --check index.js && node --check storage.js && node --check commands.js && node -e \"for (const f of require('fs').readdirSync('features')) require('child_process').execSync('node --check features/' + f, { stdio: 'inherit' })\""
   },
   "dependencies": {
     "@upstash/redis": "^1.38.2",

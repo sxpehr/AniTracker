@@ -15,7 +15,18 @@ const {
   StringSelectMenuBuilder,
   MessageFlags,
 } = require('discord.js');
-const { loadData, saveData, flushData, isStorageHealthy, backend: storageBackend } = require('./storage');
+const {
+  loadData,
+  saveData,
+  flushData,
+  isStorageHealthy,
+  backend: storageBackend,
+  loadSocial,
+  saveSocial,
+  loadStats,
+  saveStats,
+  migrateListsToSocial,
+} = require('./storage');
 const {
   getUserByName,
   getRecentActivities,
@@ -31,6 +42,20 @@ const { buildMoreInfo } = require('./moreInfo');
 const feedback = require('./feedback');
 const { commands: slashCommands } = require('./commands');
 const { LATEST_UPDATE } = require('./changelog');
+// Profiles, customisation, collections, reviews, stats (see features/)
+const { setup: setupFeatures } = require('./features/ctx');
+const ui = require('./features/ui');
+const social = require('./features/social');
+const statsEngine = require('./features/statsEngine');
+const { paletteFor, buildBannerRouter } = require('./features/themes');
+const socialCommands = require('./features/commandsSocial');
+const profileFeature = require('./features/profile');
+const settingsFeature = require('./features/settings');
+const collectionsFeature = require('./features/collections');
+const reviewsFeature = require('./features/reviews');
+const statsUi = require('./features/statsUi');
+const picker = require('./features/picker');
+const { snapshot: mediaSnapshot } = require('./features/anilistSocial');
 
 const POLL_INTERVAL_MS = (parseInt(process.env.POLL_MINUTES, 10) || 3) * 60 * 1000;
 const ANIME_ROLE_NAME = 'anime'; // server role (case-insensitive) pinged on relaunch
@@ -109,6 +134,22 @@ const client = new Client({
 
 // An 'error' event with no listener is thrown as an exception by Node's
 // EventEmitter — another way the bot used to crash on network blips.
+setupFeatures({
+  client,
+  loadData,
+  saveData,
+  loadSocial,
+  saveSocial,
+  loadStats,
+  saveStats,
+  respond,
+  signInUrlFor,
+  isOAuthConfigured,
+  setLiveActivity: (data, account, on, by) => setLiveActivity(data, account, on, by),
+  applyRecommendVote: (...args) => applyRecommendVote(...args),
+  buildActivityPreview: (...args) => buildActivityPreview(...args),
+});
+
 client.on(Events.Error, (err) => console.error('[discord client error]', err.message));
 client.on(Events.Warn, (msg) => console.warn('[discord warn]', msg));
 client.on(Events.ShardDisconnect, (ev, id) => console.warn(`[discord] shard ${id} disconnected (${ev?.code}) — discord.js will reconnect`));
@@ -153,9 +194,11 @@ app.use(
     getInviteUrl,
     storageBackend,
     isStorageHealthy,
+    loadSocial,
   })
 );
 app.use(buildOAuthRouter({ loadData, saveData, onLinked: sendLinkedConfirmation }));
+app.use(buildBannerRouter()); // generated profile banners (fetched + cached by Discord)
 
 // Last-resort Express error handler — a thrown route must never crash the process.
 // eslint-disable-next-line no-unused-vars
@@ -298,14 +341,6 @@ function ensureGuildData(data, guildId) {
   return guildData;
 }
 
-function ensureUserLists(data, userId) {
-  if (!data.userLists[userId]) data.userLists[userId] = { watchlist: [], favorites: [] };
-  const lists = data.userLists[userId];
-  if (!Array.isArray(lists.watchlist)) lists.watchlist = [];
-  if (!Array.isArray(lists.favorites)) lists.favorites = [];
-  return lists;
-}
-
 function isOptedOut(data, anilistId) {
   return Boolean(data.trackingOptOut[String(anilistId)]);
 }
@@ -339,6 +374,10 @@ async function respond(interaction, payload) {
       // Visibility is fixed when the reply/defer was created; editReply
       // doesn't accept the Ephemeral flag, so drop it here.
       const { flags, ...rest } = typeof payload === 'string' ? { content: payload } : payload;
+      if (flags) {
+        const keep = Number(flags) & ~Number(EPHEMERAL); // e.g. keep the Components V2 flag
+        if (keep) rest.flags = keep;
+      }
       return await interaction.editReply(rest);
     }
     return await interaction.reply(payload);
@@ -360,10 +399,6 @@ async function safeDefer(interaction, ephemeral) {
 
 function titleOf(media) {
   return media?.title?.english || media?.title?.romaji || 'Unknown title';
-}
-
-function stars(n) {
-  return '★'.repeat(n) + '☆'.repeat(5 - n);
 }
 
 function signInButtonRow(userId) {
@@ -432,6 +467,7 @@ client.on(Events.GuildCreate, async (guild) => {
           '`/setchannel` — pick where updates go (needs Manage Server)',
           '`/track username:<AniList name>` — start posting someone’s activity',
           '`/signin` — link your own AniList so you control your live activity',
+          '`/profile` · `/settings` — your own customizable anime profile',
           '`/help` — everything else',
         ].join('\n')
       );
@@ -444,17 +480,61 @@ client.on(Events.GuildCreate, async (guild) => {
 /* ---------------------------------------------------------------------------
  * Interaction router
  * ------------------------------------------------------------------------- */
-client.on(Events.InteractionCreate, async (interaction) => {
+client.on(Events.InteractionCreate, (interaction) => dispatchInteraction(interaction));
+
+async function dispatchInteraction(interaction) {
   try {
-    if (interaction.isChatInputCommand()) await handleSlashCommand(interaction);
-    else if (interaction.isButton()) await handleButton(interaction);
+    if (interaction.isAutocomplete()) return await socialCommands.autocomplete(interaction);
+    if (interaction.isChatInputCommand()) return await handleSlashCommand(interaction);
+    // Profile / settings / collections / reviews / stats components use "ns:..." ids.
+    if ((interaction.isButton() || interaction.isAnySelectMenu() || interaction.isModalSubmit()) && interaction.customId.includes(':')) {
+      return await routeFeatureInteraction(interaction);
+    }
+    if (interaction.isButton()) await handleButton(interaction);
     else if (interaction.isStringSelectMenu()) await handleSelectMenu(interaction);
     else if (interaction.isModalSubmit()) await handleModalSubmit(interaction);
   } catch (err) {
     console.error('Unhandled error in interaction handler:', err);
-    await respond(interaction, { content: 'Something went wrong. Try again in a bit.', flags: EPHEMERAL });
+    if (!interaction.isAutocomplete()) await respond(interaction, { content: 'Something went wrong. Try again in a bit.', flags: EPHEMERAL });
   }
-});
+}
+
+async function routeFeatureInteraction(interaction) {
+  const ns = interaction.customId.split(':')[0];
+  if (interaction.guildId) {
+    // remember which servers people use AniTracker in (for server leaderboards)
+    const s = await loadSocial();
+    if (s.users[interaction.user.id]) social.markGuild(s.users[interaction.user.id], interaction.guildId);
+  }
+  if (interaction.isModalSubmit()) {
+    if (ns === 's') return settingsFeature.onModal(interaction);
+    if (ns === 'c') return collectionsFeature.onModal(interaction);
+    if (ns === 'rv') return reviewsFeature.onModal(interaction);
+    if (ns === 'q') return picker.onModal(interaction);
+    return;
+  }
+  switch (ns) {
+    case 'p':
+      return profileFeature.onComponent(interaction);
+    case 's':
+      return settingsFeature.onComponent(interaction);
+    case 'c':
+      return collectionsFeature.onComponent(interaction);
+    case 'rv':
+      return reviewsFeature.onComponent(interaction);
+    case 'st':
+    case 'rc':
+    case 'lb':
+      return statsUi.onComponent(interaction);
+    case 'q':
+    case 'qs':
+    case 'qx':
+    case 'qr':
+      return picker.onComponent(interaction);
+    default:
+      return undefined;
+  }
+}
 
 /* ---------------------------------------------------------------------------
  * Reaction → private DM alerts
@@ -547,6 +627,17 @@ async function handleSlashCommand(interaction) {
     return;
   }
 
+  // Profiles, settings, collections, reviews, stats, recaps, leaderboards.
+  if (socialCommands.HANDLED.has(commandName)) {
+    try {
+      await socialCommands.handle(interaction);
+    } catch (err) {
+      console.error(`Error handling /${commandName}:`, err);
+      await respond(interaction, { content: 'Something went wrong. Try again in a bit.', flags: EPHEMERAL });
+    }
+    return;
+  }
+
   const data = await loadData(); // in-memory, instant
   const guildData = ensureGuildData(data, interaction.guildId);
 
@@ -562,10 +653,6 @@ async function handleSlashCommand(interaction) {
         return await handleWhosTracking(interaction, data, guildData);
       case 'setchannel':
         return await handleSetChannel(interaction, data, guildData);
-      case 'watchlater':
-        return await handleMyList(interaction, data, 'watchlist');
-      case 'myfavorites':
-        return await handleMyList(interaction, data, 'favorites');
       case 'recommendanimes':
         return await handleRecommendAnimes(interaction, guildData, data);
       case 'favorites':
@@ -738,44 +825,6 @@ async function handleSetChannel(interaction, data, guildData) {
   guildData.channelId = channel.id;
   await saveData(data);
   await respond(interaction, { content: `✅ AniList updates will now post in <#${channel.id}>.` });
-}
-
-// /watchlater and /myfavorites — one list per person, across every server.
-async function handleMyList(interaction, data, field) {
-  const list = ensureUserLists(data, interaction.user.id)[field];
-  const isWatch = field === 'watchlist';
-  const icon = isWatch ? '📌' : '🤍';
-  const name = isWatch ? 'Watch Later' : 'Favorites';
-
-  if (!list.length) {
-    await respond(interaction, {
-      content: isWatch
-        ? 'Your watch later list is empty. Click 📌 **Watch later** on any activity post to add one!'
-        : 'Your favorites list is empty. Click 🤍 **Favorite** on any activity post to add one! (Saved in AniTracker — not synced to your AniList favourites.)',
-      flags: EPHEMERAL,
-    });
-    return;
-  }
-
-  const lines = [];
-  let length = 0;
-  for (let i = 0; i < list.length; i++) {
-    const line = `\`${String(i + 1).padStart(2, ' ')}\` **[${list[i].title}](${list[i].siteUrl})**`;
-    if (length + line.length > 3800) {
-      lines.push(`…and **${list.length - i}** more`);
-      break;
-    }
-    lines.push(line);
-    length += line.length + 1;
-  }
-
-  const embed = new EmbedBuilder()
-    .setColor(DEFAULT_COLOR)
-    .setTitle(`${icon} Your ${name} · ${list.length}`)
-    .setDescription(lines.join('\n'))
-    .setFooter({ text: `Only you can see this • Click ${icon} again on a post to remove it${isWatch ? '' : ' • Not synced to AniList'}` });
-  if (list[0]?.cover) embed.setThumbnail(list[0].cover);
-  await respond(interaction, { embeds: [embed], flags: EPHEMERAL });
 }
 
 /* ----- /recommendanimes ----- */
@@ -982,7 +1031,7 @@ function buildTrackingPanel(data, account) {
     .setDescription(
       [
         off
-          ? 'Your AniList updates are **not** being posted in any server. Turning it back on starts from your *next* update — nothing you did while it was off gets posted.'
+          ? 'Your AniList updates are **not** being posted in any server (your stats and streak still update privately). Turning it back on starts from your *next* update — nothing you did while it was off gets posted.'
           : 'Your AniList updates are posted in every server tracking you.',
         '',
         serverLine,
@@ -1073,21 +1122,30 @@ async function handleHelp(interaction) {
         ].join('\n'),
       },
       {
-        name: '🔐 Your account',
-        value: ['`/signin` · `/signout` — link your AniList', '`/tracking` — turn your live activity on/off'].join('\n'),
+        name: '🪪 Your profile',
+        value: [
+          '`/profile` — your anime page (or `/profile user:@someone`)',
+          '`/settings` — theme, banner, showcase, activity style, privacy',
+          '`/signin` · `/signout` — link your AniList · `/tracking` — posts on/off',
+        ].join('\n'),
       },
       {
-        name: '📚 Lists & discovery',
+        name: '📚 Lists & reviews',
         value: [
-          '`/watchlater` · `/myfavorites` — your private lists',
-          '`/recommendanimes` — most-recommended leaderboard',
+          '`/myfavorites` · `/watchlater` · `/collection` — your lists',
+          '`/recommend` — recommend an anime with a message',
+          '`/review write` · `/review browse` — write and discover reviews',
           '`/favorites` — anyone’s AniList favourites',
         ].join('\n'),
+      },
+      {
+        name: '📊 Stats & community',
+        value: ['`/stats` — month, lifetime, streaks · `/recap` — monthly recap', '`/leaderboard` — server boards · `/recommendanimes` — most recommended'].join('\n'),
       },
       { name: '💬 Other', value: '`/feedback` — rate AniTracker & tell the developer anything\n`/update` — post an update notice silently *(Manage Server)*' },
       {
         name: '🔘 Buttons on activity posts',
-        value: '⭐ Recommend · 🤍 Favorite · 📌 Watch later · ℹ️ More info (only you see it)\nReact to a post and its owner gets a private DM.',
+        value: '💜 Recommend · ❤️ Like · ⭐ Favorite · 📌 Watch later\n✍️ Review · ➕ Save to list · 📊 More info — replies only you can see\nReact to a post and its owner gets a private DM.',
       }
     );
   const invite = getInviteUrl();
@@ -1198,7 +1256,13 @@ async function handleButton(interaction) {
   if (!interaction.guildId) return;
   const [action, idStr] = customId.split('_');
   const mediaId = parseInt(idStr, 10);
-  if (!mediaId || !['wl', 'rec', 'fav', 'info'].includes(action)) return;
+  if (!mediaId || !['wl', 'rec', 'fav', 'info', 'like', 'rvw', 'col'].includes(action)) return;
+
+  // The review form must be the very first response (no defer before a modal).
+  if (action === 'rvw') {
+    const embedTitle = interaction.message?.embeds?.[0]?.description?.match(/^# \[(.+?)\]\(/m)?.[1];
+    return reviewsFeature.openWriteForm(interaction, mediaId, embedTitle);
+  }
 
   // Ack Discord's 3s window first. If that fails the interaction is gone.
   if (!(await safeDefer(interaction, true))) return;
@@ -1207,96 +1271,128 @@ async function handleButton(interaction) {
   const guildData = ensureGuildData(data, interaction.guildId);
 
   try {
-    if (action === 'wl') await handleListToggleButton(interaction, data, mediaId, 'watchlist');
-    else if (action === 'fav') await handleListToggleButton(interaction, data, mediaId, 'favorites');
+    if (action === 'wl') await handleListToggleButton(interaction, mediaId, 'watchlist');
+    else if (action === 'fav') await handleListToggleButton(interaction, mediaId, 'favorites');
     else if (action === 'rec') await handleRecommendButton(interaction, data, guildData, mediaId);
     else if (action === 'info') await handleMoreInfoButton(interaction, mediaId);
+    else if (action === 'like') await handleLikeButton(interaction, data, guildData, mediaId);
+    else if (action === 'col') {
+      const media = await getMediaById(mediaId).catch(() => null);
+      if (!media) return respond(interaction, { content: '⚠️ AniList isn’t responding right now (their side). Try again in a bit.' });
+      const s = await loadSocial();
+      await respond(interaction, collectionsFeature.saveToPayload(social.getUser(s, interaction.user.id), media));
+    }
   } catch (err) {
     console.error(`Error handling button ${customId}:`, err);
     await respond(interaction, { content: 'Something went wrong. Try again in a bit.' });
   }
 }
 
-// Watch later + Favorite share one toggle implementation; lists are per person.
-async function handleListToggleButton(interaction, data, mediaId, field) {
-  const list = ensureUserLists(data, interaction.user.id)[field];
-  const isWatch = field === 'watchlist';
-  const existingIndex = list.findIndex((e) => e.mediaId === mediaId);
+// Small private confirmation card with the cover, used by the post buttons.
+function confirmCard(media, heading, sub, buttons = []) {
+  const snap = mediaSnapshot(media);
+  return ui.fit([ui.card(ui.ANILIST_BLUE, [ui.row([`-# ${heading}`, `### ${ui.esc(snap.title)}`, sub], snap.cover), ui.actionRow(buttons)].filter(Boolean))]);
+}
 
-  if (existingIndex !== -1) {
-    const [removed] = list.splice(existingIndex, 1);
-    await saveData(data);
-    await respond(interaction, {
-      content: isWatch ? `🗑️ Removed **${removed.title}** from your watch later list.` : `💔 Removed **${removed.title}** from your favorites.`,
-    });
+// Watch later + Favorite: one list per person (stored with their profile).
+async function handleListToggleButton(interaction, mediaId, field) {
+  const s = await loadSocial();
+  const u = social.getUser(s, interaction.user.id);
+  social.markGuild(u, interaction.guildId);
+  const list = u[field];
+  const isWatch = field === 'watchlist';
+  const media = await getMediaById(mediaId).catch(() => null);
+  const existing = list.find((e) => e.mediaId === mediaId);
+
+  if (existing) {
+    social.removeItem(list, mediaId);
+    await saveSocial();
+    const fallback = { id: mediaId, title: { english: existing.title }, siteUrl: existing.siteUrl, coverImage: { large: existing.cover } };
+    await respond(
+      interaction,
+      confirmCard(media || fallback, isWatch ? '📌 REMOVED FROM WATCH LATER' : '⭐ REMOVED FROM FAVORITES', `-# ${list.length} left`, [
+        ui.button(`col_${mediaId}`, 'Save to other lists', { emoji: '➕' }),
+      ])
+    );
     return;
   }
 
-  const media = await getMediaById(mediaId).catch(() => null);
   if (!media) {
     await respond(interaction, { content: "⚠️ Couldn't reach AniList to save that (AniList-side hiccup). Try again in a bit." });
     return;
   }
+  const res = social.addItem(list, mediaSnapshot(media), field);
+  if (!res.ok) {
+    await respond(interaction, { content: `Your ${isWatch ? 'Watch Later' : 'Favorites'} list is full — make room with \`/${isWatch ? 'watchlater' : 'myfavorites'}\`.` });
+    return;
+  }
+  await saveSocial();
+  await respond(
+    interaction,
+    confirmCard(media, isWatch ? '📌 ADDED TO WATCH LATER' : '⭐ ADDED TO FAVORITES', `-# #${list.length} on your list · tap the button again on the post to remove`, [
+      ui.button(`c:v:me:${field}:1:${Math.floor((list.length - 1) / collectionsFeature.PAGE)}`, isWatch ? 'Open Watch Later' : 'Open Favorites', { emoji: isWatch ? '📌' : '⭐' }),
+      ui.button(`col_${mediaId}`, 'More lists', { emoji: '➕' }),
+    ])
+  );
+}
+
+// Adds/removes one person's recommend vote in this server's + the global tally.
+async function applyRecommendVote(guildId, userId, media, add) {
+  const data = await loadData();
+  const mediaId = media.id;
   const title = titleOf(media);
-  list.push({ mediaId, title, siteUrl: media.siteUrl, cover: media.coverImage?.medium || null, addedAt: new Date().toISOString() });
+  if (guildId) {
+    const guildData = ensureGuildData(data, guildId);
+    const rec = (guildData.recommendations[mediaId] ||= { title: null, siteUrl: null, recommendedBy: [] });
+    rec.title = title;
+    rec.siteUrl = media.siteUrl;
+    if (add && !rec.recommendedBy.includes(userId)) rec.recommendedBy.push(userId);
+    if (!add) rec.recommendedBy = rec.recommendedBy.filter((id) => id !== userId);
+  }
+  const globalRec = (data.globalRecommendations[mediaId] ||= { title, siteUrl: media.siteUrl, recommendedBy: [] });
+  globalRec.title = title;
+  globalRec.siteUrl = media.siteUrl;
+  if (add && !globalRec.recommendedBy.includes(userId)) globalRec.recommendedBy.push(userId);
+  if (!add) {
+    const stillElsewhere = Object.values(data.guilds).some((g) => g.recommendations?.[mediaId]?.recommendedBy?.includes(userId));
+    if (!stillElsewhere) globalRec.recommendedBy = globalRec.recommendedBy.filter((id) => id !== userId);
+  }
   await saveData(data);
-  await respond(interaction, {
-    content: isWatch
-      ? `📌 Added **${title}** to your watch later list (${list.length} total) — see it with \`/watchlater\`.`
-      : `🤍 Added **${title}** to your favorites (${list.length} total) — see them with \`/myfavorites\`.`,
-  });
+}
+
+async function refreshPostButtons(interaction, guildData, rootId) {
+  try {
+    const recCount = guildData.recommendations[rootId]?.recommendedBy?.length || 0;
+    const likeCount = guildData.recentPosts[interaction.message.id]?.likes?.length || 0;
+    const infoId = findInfoIdOnMessage(interaction.message) || rootId;
+    const editPayload = { components: buildActivityButtons(rootId, infoId, recCount, likeCount) };
+    const existingEmbed = interaction.message.embeds[0];
+    if (existingEmbed) editPayload.embeds = [EmbedBuilder.from(existingEmbed).setFooter({ text: buildFooterText(recCount) })];
+    await interaction.message.edit(editPayload);
+  } catch (e) {
+    console.error('Failed to refresh post buttons:', e.message);
+  }
 }
 
 async function handleRecommendButton(interaction, data, guildData, mediaId) {
   const userId = interaction.user.id;
-  if (!guildData.recommendations[mediaId]) guildData.recommendations[mediaId] = { title: null, siteUrl: null, recommendedBy: [] };
-  const rec = guildData.recommendations[mediaId];
-  const alreadyRecommended = rec.recommendedBy.includes(userId);
+  const alreadyRecommended = Boolean(guildData.recommendations[mediaId]?.recommendedBy?.includes(userId));
+  const media = await getMediaById(mediaId).catch(() => null);
+  const fallback = { id: mediaId, title: { english: guildData.recommendations[mediaId]?.title || 'this anime' }, siteUrl: guildData.recommendations[mediaId]?.siteUrl || `https://anilist.co/anime/${mediaId}` };
+  await applyRecommendVote(interaction.guildId, userId, media || fallback, !alreadyRecommended);
 
-  if (alreadyRecommended) {
-    rec.recommendedBy = rec.recommendedBy.filter((id) => id !== userId);
-  } else {
-    if (!rec.title) {
-      const media = await getMediaById(mediaId).catch(() => null);
-      if (media) {
-        rec.title = titleOf(media);
-        rec.siteUrl = media.siteUrl;
-      }
-    }
-    rec.recommendedBy.push(userId);
-  }
+  // Mirror it in the person's own Recommendations list (shown on their profile).
+  const s = await loadSocial();
+  const u = social.getUser(s, userId);
+  social.markGuild(u, interaction.guildId);
+  if (alreadyRecommended) social.removeItem(u.recommendations, mediaId);
+  else if (media) social.addItem(u.recommendations, mediaSnapshot(media), 'recommendations');
+  await saveSocial();
 
-  // Global tally — one vote per user per anime across all servers. A vote
-  // only leaves the global tally once it's removed in EVERY server.
-  if (!data.globalRecommendations[mediaId]) {
-    data.globalRecommendations[mediaId] = { title: rec.title, siteUrl: rec.siteUrl, recommendedBy: [] };
-  }
-  const globalRec = data.globalRecommendations[mediaId];
-  if (rec.title) {
-    globalRec.title = rec.title;
-    globalRec.siteUrl = rec.siteUrl;
-  }
-  if (alreadyRecommended) {
-    const stillElsewhere = Object.values(data.guilds).some((g) => g.recommendations?.[mediaId]?.recommendedBy?.includes(userId));
-    if (!stillElsewhere) globalRec.recommendedBy = globalRec.recommendedBy.filter((id) => id !== userId);
-  } else if (!globalRec.recommendedBy.includes(userId)) {
-    globalRec.recommendedBy.push(userId);
-  }
-  await saveData(data);
-
-  // Refresh the count on the button + footer, keeping the post's More Info target.
-  try {
-    const newCount = rec.recommendedBy.length;
-    const infoId = findInfoIdOnMessage(interaction.message) || mediaId;
-    const editPayload = { components: [buildActivityButtons(mediaId, infoId, newCount)] };
-    const existingEmbed = interaction.message.embeds[0];
-    if (existingEmbed) editPayload.embeds = [EmbedBuilder.from(existingEmbed).setFooter({ text: buildFooterText(newCount) })];
-    await interaction.message.edit(editPayload);
-  } catch (e) {
-    console.error('Failed to update recommend display:', e.message);
-  }
+  await refreshPostButtons(interaction, guildData, mediaId);
 
   // DM the post's owner on a fresh recommend (not a removal).
+  const rec = guildData.recommendations[mediaId] || {};
   if (!alreadyRecommended) {
     const postInfo = guildData.recentPosts[interaction.message.id];
     const ownerId = postInfo ? profileOwnerId(data, postInfo.anilistId, postInfo.addedBy) : null;
@@ -1306,11 +1402,11 @@ async function handleRecommendButton(interaction, data, guildData, mediaId) {
         const animeName = rec.title || postInfo.animeTitle || 'an anime';
         const embed = new EmbedBuilder()
           .setColor(interaction.message.embeds[0]?.color ?? RECOMMEND_EMBED_COLOR)
-          .setAuthor({ name: `${interaction.user.displayName || interaction.user.username} recommended it ⭐`, iconURL: interaction.user.displayAvatarURL({ size: 64 }) })
+          .setAuthor({ name: `${interaction.user.displayName || interaction.user.username} recommended it 💜`, iconURL: interaction.user.displayAvatarURL({ size: 64 }) })
           .setDescription(`<@${userId}> recommended **${rec.siteUrl ? `[${animeName}](${rec.siteUrl})` : animeName}** that you were watching!\n\n🏠 **${interaction.guild.name}**`)
           .setFooter({ text: interaction.guild.name, iconURL: interaction.guild.iconURL({ size: 64 }) || undefined })
           .setTimestamp(new Date());
-        const cover = postInfo?.cover || interaction.message.embeds[0]?.image?.url;
+        const cover = postInfo?.cover || interaction.message.embeds[0]?.image?.url || interaction.message.embeds[0]?.thumbnail?.url;
         if (cover) embed.setThumbnail(cover);
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel('Jump to post').setEmoji('↗️').setURL(interaction.message.url)
@@ -1320,9 +1416,47 @@ async function handleRecommendButton(interaction, data, guildData, mediaId) {
     }
   }
 
-  await respond(interaction, {
-    content: alreadyRecommended ? 'Removed your recommendation.' : `Thanks for recommending **${rec.title || 'this'}**! ⭐ See the leaderboard with \`/recommendanimes\`.`,
-  });
+  if (alreadyRecommended) {
+    await respond(interaction, confirmCard(media || fallback, '💜 RECOMMENDATION REMOVED', '-# Removed from your profile’s recommendations too'));
+    return;
+  }
+  await respond(
+    interaction,
+    confirmCard(media || fallback, '💜 YOU RECOMMENDED', '-# It’s on your profile now — add a message so people know why', [
+      ui.button(`c:note:recommendations:${mediaId}`, 'Add a message', { emoji: '✏️', style: ui.ButtonStyle.Primary }),
+      ui.button(`p:t:${userId}:recs:0`, 'My recommendations', { emoji: '💜' }),
+    ])
+  );
+}
+
+// ❤️ Like on an activity post: count on the button + a quiet DM to the owner.
+async function handleLikeButton(interaction, data, guildData, rootId) {
+  const userId = interaction.user.id;
+  const post = (guildData.recentPosts[interaction.message.id] ||= { addedBy: null, anilistId: null, animeTitle: null });
+  post.likes = post.likes || [];
+  const had = post.likes.includes(userId);
+  post.likes = had ? post.likes.filter((x) => x !== userId) : [...post.likes, userId];
+  await saveData(data);
+  await refreshPostButtons(interaction, guildData, rootId);
+  await respond(interaction, { content: had ? 'Unliked.' : '❤️ Liked!' });
+
+  const ownerId = profileOwnerId(data, post.anilistId, post.addedBy);
+  if (had || !ownerId || ownerId === userId) return;
+  const key = `like:${interaction.message.id}:${userId}`;
+  if (Date.now() - (reactionDmSeen.get(key) || 0) < REACTION_DM_DEDUPE_MS) return;
+  reactionDmSeen.set(key, Date.now());
+  const owner = await client.users.fetch(ownerId).catch(() => null);
+  if (!owner) return;
+  const embed = new EmbedBuilder()
+    .setColor(interaction.message.embeds[0]?.color ?? DEFAULT_COLOR)
+    .setAuthor({ name: `${interaction.user.displayName || interaction.user.username} liked your activity ❤️`, iconURL: interaction.user.displayAvatarURL({ size: 64 }) })
+    .setDescription(`<@${userId}> liked you watching **${post.animeTitle || 'an anime'}**\n\n🏠 **${interaction.guild.name}**`)
+    .setFooter({ text: interaction.guild.name, iconURL: interaction.guild.iconURL({ size: 64 }) || undefined })
+    .setTimestamp(new Date());
+  const cover = post.cover || interaction.message.embeds[0]?.image?.url || interaction.message.embeds[0]?.thumbnail?.url;
+  if (cover) embed.setThumbnail(cover);
+  const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel('Jump to post').setEmoji('↗️').setURL(interaction.message.url));
+  await owner.send({ embeds: [embed], components: [row], allowedMentions: { parse: [] } }).catch(() => {});
 }
 
 function findInfoIdOnMessage(message) {
@@ -1398,18 +1532,32 @@ async function handleMoreInfoButton(interaction, mediaId) {
 /* ---------------------------------------------------------------------------
  * Activity post building
  * ------------------------------------------------------------------------- */
-function buildActivityButtons(rootId, infoMediaId, recommendCount = 0) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`rec_${rootId}`)
-      .setLabel(recommendCount ? `Recommend • ${recommendCount}` : 'Recommend')
-      .setEmoji('⭐')
-      .setStyle(ButtonStyle.Primary),
-    // Discord has no pink button colour — Danger (red) is the closest.
-    new ButtonBuilder().setCustomId(`fav_${rootId}`).setLabel('Favorite').setEmoji('🤍').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId(`wl_${rootId}`).setLabel('Watch later').setEmoji('📌').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`info_${infoMediaId || rootId}`).setLabel('More Info').setEmoji('ℹ️').setStyle(ButtonStyle.Secondary)
-  );
+// Two rows under every activity post:
+//   💜 Recommend · ❤️ Like · ⭐ Favorite · 📌 Watch later
+//   ✍️ Review · ➕ Save to list · 📊 More info
+function buildActivityButtons(rootId, infoMediaId, recommendCount = 0, likeCount = 0) {
+  const target = infoMediaId || rootId;
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`rec_${rootId}`)
+        .setLabel(recommendCount ? `Recommend · ${recommendCount}` : 'Recommend')
+        .setEmoji('💜')
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(`like_${rootId}`)
+        .setLabel(likeCount ? `Like · ${likeCount}` : 'Like')
+        .setEmoji('❤️')
+        .setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`fav_${rootId}`).setLabel('Favorite').setEmoji('⭐').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`wl_${rootId}`).setLabel('Watch later').setEmoji('📌').setStyle(ButtonStyle.Secondary)
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`rvw_${target}`).setLabel('Review').setEmoji('✍️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`col_${rootId}`).setLabel('Save to list').setEmoji('➕').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`info_${target}`).setLabel('More info').setEmoji('📊').setStyle(ButtonStyle.Secondary)
+    ),
+  ];
 }
 
 function buildFooterText(recommendCount) {
@@ -1542,9 +1690,17 @@ function progressText(activity, season) {
   return parts.join(', ');
 }
 
-async function buildEmbed(username, avatarUrl, activity, streak, seasonInfo) {
+// `look` = the profile owner's activity-post settings (style, colour, which
+// details to show). With no settings saved, this produces the original look.
+async function buildEmbed(username, avatarUrl, activity, streak, seasonInfo, look = null) {
+  const a = look?.activity || { style: 'full', color: 'cover', show: social.DEFAULT_ACTIVITY_FIELDS };
+  const show = new Set(a.show || social.DEFAULT_ACTIVITY_FIELDS);
+  const style = a.style || 'full';
   const embed = new EmbedBuilder().setTimestamp(new Date(activity.createdAt * 1000));
-  const authorOpts = { name: `✦ ${username} 🔥 ${streak || 1}`, url: `https://anilist.co/user/${encodeURIComponent(username)}` };
+  const authorOpts = {
+    name: show.has('streak') && streak > 0 ? `✦ ${username} 🔥 ${streak}` : `✦ ${username}`,
+    url: `https://anilist.co/user/${encodeURIComponent(username)}`,
+  };
   if (avatarUrl) authorOpts.iconURL = avatarUrl;
   embed.setAuthor(authorOpts);
 
@@ -1554,27 +1710,34 @@ async function buildEmbed(username, avatarUrl, activity, streak, seasonInfo) {
     const verb = statusVerbShort(activity.status);
     const captionLine = `${progress ? `${verb} ${progress}` : verb} ${statusEmoji(activity.status)}`;
     // "# " header renders bigger than Title and doesn't force an underline.
-    const headerLine = `# [${rootTitle}](${rootSiteUrl})`;
+    const headerLine = `${style === 'minimal' ? '##' : '#'} [${rootTitle}](${rootSiteUrl})`;
 
     const cover = activity.media.coverImage || {};
     const displayImage = cover.extraLarge || cover.large || cover.medium;
-    const color = await getDominantColor(cover.medium || cover.large || displayImage);
+    let color;
+    if (a.color === 'theme') color = paletteFor(look?.profile).accent;
+    else if (a.color === 'anilist') color = DEFAULT_COLOR;
+    else color = await getDominantColor(cover.medium || cover.large || displayImage);
 
     const infoBits = [];
-    if (typeof activity.media.averageScore === 'number') infoBits.push(`⭐ ${(activity.media.averageScore / 10).toFixed(1)}/10`);
-    if (activity.media.genres?.length) infoBits.push(`🎭 ${activity.media.genres.slice(0, 3).join(', ')}`);
+    if (show.has('rating') && typeof activity.media.averageScore === 'number') infoBits.push(`⭐ ${(activity.media.averageScore / 10).toFixed(1)}/10`);
+    if (show.has('genres') && activity.media.genres?.length) infoBits.push(`🎭 ${activity.media.genres.slice(0, 3).join(', ')}`);
     if (activity.media.isAdult) infoBits.push('🔞 Mature');
-    if (popularityRank) infoBits.push(`❤️ #${popularityRank} Most Popular`);
-    const infoLine = infoBits.join('  •  ');
+    if (show.has('popularity') && popularityRank) infoBits.push(`❤️ #${popularityRank} Most Popular`);
+    const infoLine = style === 'minimal' ? '' : infoBits.join('  •  ');
 
-    const synopsis = truncate(stripDescription(activity.media.description), 160);
+    const synopsisMax = style === 'compact' ? 100 : 160;
+    const synopsis = style !== 'minimal' && show.has('description') ? truncate(stripDescription(activity.media.description), synopsisMax) : '';
     const descParts = [`${captionLine}\n${headerLine}`];
     if (infoLine) descParts.push(infoLine);
     if (synopsis) descParts.push(synopsis);
     embed.setDescription(descParts.join('\n\n'));
 
     embed.setColor(color).setFooter({ text: buildFooterText(0) });
-    if (displayImage) embed.setImage(displayImage);
+    if (show.has('cover') && displayImage) {
+      if (style === 'full') embed.setImage(displayImage);
+      else embed.setThumbnail(cover.large || displayImage);
+    }
   } else if (activity.__typename === 'TextActivity') {
     embed
       .setColor(DEFAULT_COLOR)
@@ -1625,13 +1788,40 @@ async function pollAllGuilds() {
 
 async function pollOnce() {
   const data = await loadData();
-  // Same AniList profile tracked in several servers → fetch it once per poll.
+  const soc = await loadSocial();
+  const st = await loadStats();
+  // Each AniList profile is fetched once per poll, however many servers track it.
   const activityCache = new Map();
   const fetchActivities = (anilistId) => {
-    if (!activityCache.has(anilistId)) activityCache.set(anilistId, getRecentActivities(anilistId, 10));
+    if (!activityCache.has(anilistId)) activityCache.set(anilistId, getRecentActivities(anilistId, 25));
     return activityCache.get(anilistId);
   };
+  const tzFor = (anilistId) => {
+    const ownerId = social.discordFor(data, anilistId);
+    return (ownerId && soc.users[ownerId]?.prefs?.timezone) || social.DEFAULT_TZ;
+  };
 
+  // 1) Stats & streaks — for every AniList account we know: tracked in a
+  //    server OR signed in with /signin. Recorded even when posting is off.
+  const accounts = new Set();
+  for (const [guildId, g] of Object.entries(data.guilds)) {
+    if (!client.guilds.cache.has(guildId)) continue;
+    for (const u of g.users || []) accounts.add(u.id);
+  }
+  for (const acct of Object.values(data.linkedAccounts)) accounts.add(acct.anilistId);
+  let statsChanged = false;
+  for (const anilistId of accounts) {
+    if (isPaused) break;
+    try {
+      const acts = await fetchActivities(anilistId);
+      if (statsEngine.record(st, anilistId, acts, tzFor(anilistId))) statsChanged = true;
+    } catch (e) {
+      console.error(`Failed recording stats for AniList user ${anilistId}:`, e.message);
+    }
+  }
+  if (statsChanged) saveStats();
+
+  // 2) Post new activity in each server.
   let changed = false;
 
   for (const guildId of Object.keys(data.guilds)) {
@@ -1653,19 +1843,20 @@ async function pollOnce() {
     warnedChannels.delete(channel.id);
 
     for (const user of [...guildData.users]) {
-      if (isOptedOut(data, user.id)) continue; // owner turned live activity off
       try {
         const activities = await fetchActivities(user.id);
         const newOnes = activities.filter((a) => a.id > (user.lastActivityId || 0)).sort((a, b) => a.id - b.id);
         if (!newOnes.length) continue;
-
-        // Daily streak (UTC days), once per poll batch.
-        const today = new Date().toISOString().slice(0, 10);
-        if (user.lastActivityDate !== today) {
-          const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-          user.streak = user.lastActivityDate === yesterday ? (user.streak || 0) + 1 : 1;
-          user.lastActivityDate = today;
+        if (isOptedOut(data, user.id)) {
+          // Owner turned live activity off: skip posting, but don't build a backlog either.
+          user.lastActivityId = Math.max(user.lastActivityId || 0, ...newOnes.map((a) => a.id));
+          changed = true;
+          continue;
         }
+
+        const ownerId = profileOwnerId(data, user.id, user.addedBy);
+        const look = ownerId && soc.users[ownerId] ? social.getUser(soc, ownerId) : null;
+        const streak = statsEngine.streakOf(st.users[String(user.id)], tzFor(user.id)).current;
 
         for (const activity of newOnes) {
           let seasonInfo = null;
@@ -1679,8 +1870,8 @@ async function pollOnce() {
             data.watchStats[key] = entry;
           }
 
-          const embed = await buildEmbed(user.username, user.avatar, activity, user.streak, seasonInfo);
-          const components = seasonInfo ? [buildActivityButtons(seasonInfo.rootId, activity.media.id, 0)] : [];
+          const embed = await buildEmbed(user.username, user.avatar, activity, streak, seasonInfo, look);
+          const components = seasonInfo ? buildActivityButtons(seasonInfo.rootId, activity.media.id, 0, 0) : [];
 
           const sentMessage = await channel.send({
             content: user.addedBy ? `<@${user.addedBy}>` : undefined,
@@ -1698,6 +1889,7 @@ async function pollOnce() {
             siteUrl: seasonInfo ? seasonInfo.rootSiteUrl : null,
             mediaId: activity.media?.id || null,
             cover: activity.media?.coverImage?.large || activity.media?.coverImage?.medium || null,
+            likes: [],
           };
           // Advance per activity, so a failure halfway never re-posts the earlier ones.
           user.lastActivityId = Math.max(user.lastActivityId || 0, activity.id);
@@ -1717,6 +1909,72 @@ async function pollOnce() {
   }
 
   if (changed) await saveData(data);
+  await sendMonthlyRecaps(data, soc, st).catch((e) => console.error('Monthly recaps failed:', e.message));
+}
+
+// Settings → Activity posts → "Preview a post": the person's latest real
+// activity (or a sample) rendered with their unsaved draft settings.
+async function buildActivityPreview(userId, draftUser) {
+  const data = await loadData();
+  const st = await loadStats();
+  const al = social.anilistFor(data, userId);
+  let activity = null;
+  if (al) {
+    const acts = await getRecentActivities(al.id, 10).catch(() => []);
+    activity = acts.find((a) => a.__typename === 'ListActivity' && a.media?.type === 'ANIME') || null;
+  }
+  if (!activity) {
+    const m = await getMediaDetailsCached(154587).catch(() => null); // Frieren as a friendly sample
+    if (!m) return null;
+    activity = {
+      __typename: 'ListActivity',
+      id: 0,
+      status: 'watched episode',
+      progress: '5',
+      createdAt: Math.floor(Date.now() / 1000),
+      media: { ...m, coverImage: { extraLarge: m.coverImage?.extraLarge, large: m.coverImage?.large, medium: m.coverImage?.large } },
+    };
+  }
+  const seasonInfo = await resolveSeasonInfo(activity.media.id, titleOf(activity.media), activity.media.siteUrl, activity.media.type);
+  const tz = draftUser?.prefs?.timezone || social.DEFAULT_TZ;
+  const streak = al ? statsEngine.streakOf(st.users[String(al.id)], tz).current : 3;
+  const username = al?.name || 'you';
+  const embed = await buildEmbed(username, al?.avatar || null, activity, streak, seasonInfo, draftUser);
+  const rows = buildActivityButtons(seasonInfo.rootId, activity.media.id, 0, 0);
+  rows.forEach((r) => r.components.forEach((b) => b.setDisabled(true)));
+  return { embeds: [embed], components: rows };
+}
+
+// People who chose "DM me my recap" get last month's recap during the first
+// week of a new month (so a bot restart on the 1st doesn't skip anyone).
+let lastRecapCheck = 0;
+async function sendMonthlyRecaps(data, soc, st) {
+  if (Date.now() - lastRecapCheck < 60 * 60 * 1000) return; // at most hourly
+  lastRecapCheck = Date.now();
+  let sent = 0;
+  for (const [userId, u] of Object.entries(soc.users)) {
+    if (!u.prefs?.recapDm || sent >= 15) continue;
+    const al = social.anilistFor(data, userId);
+    if (!al) continue;
+    const tz = u.prefs.timezone || social.DEFAULT_TZ;
+    const today = statsEngine.dayKey(new Date(), tz);
+    if (Number(today.slice(8, 10)) > 7) continue;
+    const prev = statsEngine.lastMonths(statsEngine.monthKey(today), 2)[0];
+    if (u.prefs.lastRecapSent === prev) continue;
+    if (!st.users[String(al.id)]?.months?.[prev]?.e) {
+      u.prefs.lastRecapSent = prev; // nothing watched — nothing to send
+      continue;
+    }
+    try {
+      const user = await client.users.fetch(userId);
+      await user.send(await statsUi.recapPayload(userId, userId, prev, { shareable: false }));
+      sent++;
+    } catch (e) {
+      console.error(`Couldn't DM recap to ${userId}:`, e.message);
+    }
+    u.prefs.lastRecapSent = prev;
+  }
+  saveSocial();
 }
 
 /* ---------------------------------------------------------------------------
@@ -1727,7 +1985,9 @@ async function pollOnce() {
     console.error('DISCORD_TOKEN is not set — cannot log in.');
     return;
   }
-  await loadData(); // warm the in-memory store before anything can touch it
+  // Warm every storage document before anything can touch it.
+  await Promise.all([loadData(), loadSocial(), loadStats()]);
+  await migrateListsToSocial().catch((e) => console.error('List migration failed:', e.message));
   await recordBoot();
   try {
     await client.login(process.env.DISCORD_TOKEN);
@@ -1741,5 +2001,5 @@ async function pollOnce() {
 
 // Exposed only so the handlers can be exercised in isolation; unused at runtime.
 module.exports = {
-  _internals: { client, app, handleSlashCommand, handleButton, handleModalSubmit, handleSelectMenu, pollOnce, buildEmbed, resolveSeasonInfo, getFranchiseSeasonIds },
+  _internals: { client, app, dispatchInteraction, buildActivityPreview, sendMonthlyRecaps, handleSlashCommand, handleButton, handleModalSubmit, handleSelectMenu, pollOnce, buildEmbed, resolveSeasonInfo, getFranchiseSeasonIds },
 };

@@ -84,7 +84,7 @@ function commandFeedback(data) {
 // client: the discord.js Client instance (for live guild/channel/user info)
 // deps: { loadData, saveData, getPaused, setPaused, botStartedAt, getInviteUrl, storageBackend, isStorageHealthy }
 function buildDashboardRouter(client, deps) {
-  const { loadData, saveData, getPaused, setPaused, botStartedAt, getInviteUrl, storageBackend, isStorageHealthy } = deps;
+  const { loadData, saveData, getPaused, setPaused, botStartedAt, getInviteUrl, storageBackend, isStorageHealthy, loadSocial } = deps;
   const router = express.Router();
 
   router.use(express.json({ limit: '100kb' }));
@@ -163,6 +163,14 @@ function buildDashboardRouter(client, deps) {
         totalTrackedUsers,
         totalRecommendations,
         linkedAccounts: Object.keys(data.linkedAccounts).length,
+        ...(await (async () => {
+          if (!loadSocial) return {};
+          const soc = await loadSocial();
+          return {
+            profiles: Object.values(soc.users).filter((u) => u.profile?.customizedAt).length,
+            reviews: Object.keys(soc.reviews || {}).length,
+          };
+        })()),
         botPaused: getPaused(),
         uptimeSeconds: Math.floor((Date.now() - botStartedAt) / 1000),
         memoryMB: Math.round(mem.rss / 1024 / 1024),
@@ -301,8 +309,8 @@ function buildDashboardRouter(client, deps) {
   router.get(
     '/leaderboards/watchlater',
     wrap(async (req, res) => {
-      const data = await loadData();
-      const users = Object.entries(data.userLists || {})
+      const soc = loadSocial ? await loadSocial() : { users: {} };
+      const users = Object.entries(soc.users || {})
         .filter(([, l]) => l.watchlist?.length)
         .map(([userId, l]) => ({ userId, count: l.watchlist.length, titles: l.watchlist }))
         .sort((a, b) => b.count - a.count)

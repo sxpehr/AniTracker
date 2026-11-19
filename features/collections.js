@@ -1,7 +1,7 @@
 const { ModalBuilder, TextInputBuilder, TextInputStyle, LabelBuilder, StringSelectMenuBuilder } = require('discord.js');
 const ui = require('./ui');
 const social = require('./social');
-const { paletteFor, ringUrl, hdCover } = require('./themes');
+const { paletteFor, barUrl } = require('./themes');
 const { ctx } = require('./ctx');
 const { snapshot, getProfileSnapshot, getMediaLite } = require('./anilistSocial');
 const picker = require('./picker');
@@ -133,24 +133,30 @@ async function rotationEntries(u, anilistId) {
   return { all, current };
 }
 
-// One row per show: title + episode count beside a progress ring (the
-// cover inside a ring that fills in your theme colour). Hand-added shows
-// without AniList progress get their plain cover instead.
+// One entry per show: title with the episode count beside it, then a real
+// progress bar (accent fill over a muted track, faint 25/50/75% ticks).
+// Unknown totals (still airing) get no bar — we never invent a percentage.
 function rotationRows(entries, accent) {
-  return entries.map((e) => {
+  const out = [];
+  for (const e of entries) {
     const title = `${e.pinned ? '📌 ' : ''}**[${ui.esc(ui.clip(e.title, 60))}](${e.siteUrl})**`;
-    let sub;
-    let thumb = hdCover(e.cover);
-    if (e.progress === null) sub = '-# Added by hand';
-    else {
-      const aired = e.next ? e.next.episode - 1 : null;
-      const total = e.total || aired || 0;
-      if (e.total) sub = `-# **${e.progress}** / ${e.total} episodes  ·  ${Math.round((e.progress / e.total) * 100)}%`;
-      else sub = `-# **${e.progress}** episode${e.progress === 1 ? '' : 's'} in${e.next ? `  ·  ep ${e.next.episode} ${ui.relTime(e.next.airingAt * 1000)}` : ''}`;
-      thumb = ringUrl(e.mediaId, e.progress, total, accent) || thumb;
+    if (e.progress === null) {
+      out.push(ui.text(`${title}\n-# Added by hand`));
+      continue;
     }
-    return ui.row([title, sub], thumb);
-  });
+    const progress = Math.max(0, e.progress || 0);
+    if (e.total > 0) {
+      const shown = Math.min(progress, e.total);
+      const pct = Math.round((shown / e.total) * 1000) / 10;
+      out.push(ui.text(`${title}  ·  **${shown}** / ${e.total}  ·  ${pct}%${e.next ? `\n-# ep ${e.next.episode} ${ui.relTime(e.next.airingAt * 1000)}` : ''}`));
+      const bar = barUrl(shown, e.total, accent);
+      const g = bar ? ui.gallery([{ url: bar, description: `${shown} of ${e.total} episodes` }]) : null;
+      if (g) out.push(g);
+    } else {
+      out.push(ui.text(`${title}  ·  **${progress}** episode${progress === 1 ? '' : 's'}\n-# total not announced yet${e.next ? ` · ep ${e.next.episode} ${ui.relTime(e.next.airingAt * 1000)}` : ''}`));
+    }
+  }
+  return out;
 }
 
 async function rotationBlocks(u, anilistId, { manage = false, limit = 6 } = {}) {
@@ -160,6 +166,8 @@ async function rotationBlocks(u, anilistId, { manage = false, limit = 6 } = {}) 
   if (!anilistId && !all.length) blocks.push(ui.text('*Link an AniList account with `/signin` to fill this automatically, or add shows by hand.*'));
   else if (!all.length) blocks.push(ui.text('*Nothing in rotation right now.*'));
   else {
+    const covers = ui.coverGallery(all.slice(0, 4).map((e) => ({ url: e.cover, description: e.title })));
+    if (covers) blocks.push(covers);
     blocks.push(...rotationRows(all.slice(0, limit), accent));
     if (all.length > limit) blocks.push(ui.text(`-# +${all.length - limit} more`));
   }

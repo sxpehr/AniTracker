@@ -47,6 +47,23 @@ function formatDate(d) {
   return String(d.year);
 }
 
+// Clean, spoiler-free synopsis that ends on a full sentence when it's cut.
+function cleanDescription(text, max) {
+  if (!text) return '';
+  const cleaned = text
+    .replace(/~!.*?!~/gs, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/?[a-z][^>]*>/gi, '')
+    .replace(/\(Source:[^)]*\)/gi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]+/g, ' ')
+    .trim();
+  if (cleaned.length <= max) return cleaned;
+  const cut = cleaned.slice(0, max);
+  const stop = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('.\n'));
+  return `${stop > max * 0.6 ? cut.slice(0, stop + 1) : cut.trimEnd()}…`;
+}
+
 function trailerUrl(trailer) {
   if (!trailer?.id) return null;
   if (trailer.site === 'youtube') return `https://www.youtube.com/watch?v=${trailer.id}`;
@@ -75,9 +92,8 @@ function buildMoreInfo(media, extra = {}) {
 
   const headerBits = [FORMAT_LABELS[media.format] || prettyEnum(media.format), STATUS_LABELS[media.status]].filter(Boolean);
 
-  // Everything already on the activity post (cover, score, genres, popularity
-  // rank, mature tag, synopsis) is deliberately left out here — this panel
-  // only adds what the post doesn't show, in a tidy 3-column grid.
+  // Score, genres and popularity are already on the activity post, so they're
+  // left out; the full synopsis is here (the post only shows a short teaser).
   const altTitle = media.title?.native || (media.title?.english && media.title?.romaji !== media.title?.english ? media.title.romaji : null);
 
   const main = new EmbedBuilder()
@@ -87,7 +103,9 @@ function buildMoreInfo(media, extra = {}) {
     .setFooter({ text: 'Only you can see this • Data from AniList' });
 
   if (headerBits.length) main.setAuthor({ name: headerBits.join('  •  ') });
-  if (altTitle) main.setDescription(`*${truncate(altTitle, 200)}*`);
+  const synopsis = cleanDescription(media.description, 900);
+  const desc = [altTitle ? `*${truncate(altTitle, 200)}*` : null, synopsis || null].filter(Boolean).join('\n\n');
+  if (desc) main.setDescription(truncate(desc, 4000));
   if (media.bannerImage) main.setImage(media.bannerImage);
 
   const fields = [];

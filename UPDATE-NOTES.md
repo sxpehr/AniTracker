@@ -1,3 +1,17 @@
+# Banner compositing, favorites collage, progress bars
+
+- **Avatar baked into every banner:** painted, featured-anime and your own image or GIF. The avatar is a circle with a subtle dark border, overlapping the bottom-left edge, always the same size and position.
+  - **Animated GIF banners stay animated.** Every frame is composited with the avatar fixed in place. Original frame timing, looping, transparency and disposal are respected. Animated (Nitro) avatars animate too, synced to the banner's timeline, or on their own over a static banner.
+  - Very long GIFs are thinned to ≤ 90 frames (durations merged), output is 800 px wide and kept under ~7.5 MB (it retries smaller if needed). A broken or blocked image falls back to your theme art instead of breaking the profile.
+  - Results are cached in memory and on disk, and only regenerate when the banner, colours or avatar change. They're pre-built when you save settings or open a profile.
+  - Custom links are downloaded safely: https only, no private or internal addresses, 15 MB cap, image types only.
+- **Favorites collage:** your first three favorites as a banner-art collage with no text. 3 → two side by side plus one full width; 2 → side by side; 1 → full width. Rounded corners with transparent gaps. When an anime has no banner, its cover is used, cropped toward the top so faces stay in frame.
+- **In Rotation progress bars:** title, then **current / total** and the percentage beside it (4/12 → 33.3%), then a real bar underneath. The fill is continuous in your accent colour over a muted track, with faint ticks at 25 / 50 / 75 %. Unknown totals (still airing) show no bar and no percentage, and progress is capped at 100 %.
+- **Identity block:** your status sits next to your name and your bio goes underneath it, then the details and stats. The creator gets a `✦ CREATOR` tag.
+- **More Info** shows the full spoiler-free synopsis again.
+
+---
+
 # Profile design pass + usability commands
 
 - **Header:** the painted and featured-anime banners now come back as one image with your avatar large and overlapping the banner's bottom edge, ringed in your accent. The name uses the largest heading, the tagline sits right under it as a quote, and the @handle, AniList link and theme are small underneath. Stats come straight after. Custom image or GIF banners are shown untouched, with the avatar beside the name.

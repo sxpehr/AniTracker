@@ -67,6 +67,14 @@ const TIMEZONES = [
 ];
 const DEFAULT_TZ = 'America/Toronto';
 
+// Special profile tags, by Discord user id.
+const BADGES = {
+  '557814169903300639': [{ key: 'creator', label: '✦ CREATOR' }],
+};
+function badgesFor(userId) {
+  return BADGES[userId] || [];
+}
+
 const LIMITS = { favorites: 50, watchlist: 200, recommendations: 100, collections: 15, collectionItems: 100, bio: 400, tagline: 80, note: 140 };
 
 function defaults() {
@@ -227,6 +235,8 @@ function reviewFor(social, userId, mediaId) {
 }
 
 module.exports = {
+  BADGES,
+  badgesFor,
   SECTIONS,
   DEFAULT_SECTIONS,
   LAYOUTS,

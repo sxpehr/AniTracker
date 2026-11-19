@@ -4,7 +4,7 @@ const engine = require('./statsEngine');
 const collections = require('./collections');
 const reviews = require('./reviews');
 const statsUi = require('./statsUi');
-const { paletteFor, bannerUrlFor, headerUrlFor, hdCover } = require('./themes');
+const { paletteFor, bannerUrlFor, headerUrlFor, hdCover, collageUrl, warmHeader } = require('./themes');
 const { getMediaLite, getProfileSnapshot } = require('./anilistSocial');
 const { ctx } = require('./ctx');
 const { getRecentActivities } = require('../anilist');
@@ -60,19 +60,24 @@ async function discordUser(id) {
 // Identity block: big name, the tagline right under it as a quote, then the
 // quiet details. When the avatar is already painted into the header image
 // (overlapping the banner) it isn't repeated here.
-function identityLines(u, user, al, pal) {
+// Identity block: name with any badges and the status right beside it,
+// the bio directly underneath, then the quiet details.
+function identityLines(u, user, al, pal, ownerId) {
   const name = u.profile.displayName || user?.globalName || user?.username || 'Unknown';
+  const badges = social.badgesFor(ownerId).map((b) => `  \`${b.label}\``).join('');
+  const status = u.profile.tagline ? `  ·  *${ui.softEsc(u.profile.tagline)}*` : '';
   const meta = [user?.username ? `@${user.username}` : null, al ? `[AniList ↗](${al.siteUrl})` : null, `${pal.name} theme`].filter(Boolean).join('  ·  ');
-  const lines = [`# ${ui.esc(name)}`];
-  if (u.profile.tagline) lines.push(`*“${ui.softEsc(u.profile.tagline)}”*`);
+  const lines = [`## ${ui.esc(name)}${badges}${status}`];
+  if (u.profile.bio && u.profile.sections.includes('bio')) lines.push(ui.softEsc(u.profile.bio));
   lines.push(`-# ${meta}`);
   return lines;
 }
 
-function header(u, user, al, pal, { avatarInImage = false } = {}) {
-  const lines = identityLines(u, user, al, pal);
+function header(u, user, al, pal, { avatarInImage = false, ownerId } = {}) {
+  const lines = identityLines(u, user, al, pal, ownerId);
   if (avatarInImage) return ui.text(lines.join('\n'));
-  return ui.row(lines, user?.displayAvatarURL?.({ size: 512, extension: 'png' }));
+  // a Section holds at most 3 text blocks
+  return ui.row([lines[0], lines.slice(1, -1).join('\n') || null, lines[lines.length - 1]].filter(Boolean), user?.displayAvatarURL?.({ size: 512, extension: 'png' }));
 }
 
 /* ----------------------------- overview parts ----------------------------- */
@@ -117,13 +122,13 @@ const parts = {
     return out;
   },
 
+  // Favorites: a small cinematic collage of up to three banners, no text.
   favorites: ({ u }) => {
     if (!u.favorites.length) return [];
-    const top = u.favorites.slice(0, 4);
-    const out = [ui.text(`${ui.label(`Favorites · ${u.favorites.length}`)}`)];
-    const g = ui.coverGallery(top.map((e) => ({ url: e.cover, description: e.title })), { single: 'row' });
+    const url = collageUrl(u.favorites.slice(0, 3).map((e) => e.mediaId));
+    const out = [ui.text(ui.label(`Favorites · ${u.favorites.length}`))];
+    const g = url ? ui.gallery([{ url, description: u.favorites.slice(0, 3).map((e) => e.title).join(' · ') }]) : ui.coverGallery(u.favorites.slice(0, 4).map((e) => ({ url: e.cover, description: e.title })), { single: 'row' });
     if (g) out.push(g);
-    out.push(ui.optional(ui.text(`-# ${top.map((e) => ui.esc(ui.clip(e.title, 30))).join('  ·  ')}${u.favorites.length > 4 ? `  ·  +${u.favorites.length - 4} more` : ''}`), { priority: 1 }));
     return out;
   },
 
@@ -187,7 +192,7 @@ async function overviewBlocks(d) {
   if (enabled.has('stats')) blocks.push(...parts.stats(d).filter(Boolean));
   let i = 0;
   for (const key of order) {
-    if (key === 'stats' || !enabled.has(key)) continue;
+    if (key === 'stats' || key === 'bio' || !enabled.has(key)) continue; // both live in the header now
     const comps = parts[key](d).filter(Boolean);
     if (!comps.length) continue;
     // Each section is one unit: if Discord's 40-component limit is hit, whole
@@ -362,7 +367,8 @@ async function renderProfile({ ownerId, viewerId, tab = 'overview', page = 0, us
     const banner = headerImg || (previewBanner !== null ? previewBanner : bannerUrlFor(u.profile));
     const g = banner ? ui.gallery([{ url: banner, description: 'Profile banner' }]) : null;
     if (g) children.push(g);
-    children.push(header(u, user, al, pal, { avatarInImage: Boolean(headerImg && g) }));
+    children.push(header(u, user, al, pal, { avatarInImage: Boolean(headerImg && g), ownerId }));
+    if (headerImg && user) warmHeader(u.profile, user);
     children.push(...(await overviewBlocks(d)));
   } else {
     children.push(ui.text(`-# ${ui.esc(u.profile.displayName || user?.globalName || user?.username || 'Profile')}  ›  ${TABS[tab]?.label.toUpperCase() || ''}`));

@@ -1,7 +1,7 @@
 const { ModalBuilder, TextInputBuilder, TextInputStyle, LabelBuilder, TextDisplayBuilder, StringSelectMenuBuilder, PermissionFlagsBits } = require('discord.js');
 const ui = require('./ui');
 const social = require('./social');
-const { THEMES, paletteFor, parseHex, hex, bannerUrlFor, headerUrlFor, normalizeImageUrl } = require('./themes');
+const { THEMES, paletteFor, parseHex, hex, bannerUrlFor, headerUrlFor, normalizeImageUrl, warmHeader } = require('./themes');
 const { ctx } = require('./ctx');
 const { snapshot, getOpenings, titleOf } = require('./anilistSocial');
 const picker = require('./picker');
@@ -311,11 +311,14 @@ async function previewCard(userId, d) {
   const banner = headerImg || bannerUrlFor(u.profile);
   const g = banner ? ui.gallery([{ url: banner, description: 'Banner preview' }]) : null;
   if (g) children.push(g);
-  const lines = [`# ${ui.esc(name)}`];
-  if (u.profile.tagline) lines.push(`*“${ui.softEsc(u.profile.tagline)}”*`);
+  const badges = social.badgesFor(userId).map((b) => `  \`${b.label}\``).join('');
+  const lines = [`## ${ui.esc(name)}${badges}${u.profile.tagline ? `  ·  *${ui.softEsc(u.profile.tagline)}*` : ''}`];
+  if (u.profile.bio && u.profile.sections.includes('bio')) lines.push(ui.softEsc(ui.clip(u.profile.bio, 300)));
   lines.push(`-# ${user ? `@${user.username} · ` : ''}${pal.name} theme`);
-  children.push(headerImg && g ? ui.text(lines.join('\n')) : ui.row(lines, user?.displayAvatarURL?.({ size: 512, extension: 'png' })));
-  if (u.profile.bio && u.profile.sections.includes('bio')) children.push(ui.text(ui.softEsc(ui.clip(u.profile.bio, 300))));
+  if (headerImg && g) {
+    children.push(ui.text(lines.join('\n')));
+    if (user) warmHeader(u.profile, user);
+  } else children.push(ui.row([lines[0], lines.slice(1, -1).join('\n') || null, lines[lines.length - 1]].filter(Boolean), user?.displayAvatarURL?.({ size: 512, extension: 'png' })));
   const f = u.profile.featured;
   if (f && u.profile.sections.includes('featured')) children.push(ui.row([ui.label('Featured'), `**${ui.esc(f.title)}**`], f.cover));
   if (u.profile.opening && u.profile.sections.includes('opening')) children.push(ui.text(`-# 🎵 ${ui.esc(u.profile.opening.song || u.profile.opening.slug)} · ${ui.esc(u.profile.opening.animeTitle)}`));
@@ -363,6 +366,11 @@ async function save(userId, d) {
   }
   await ctx.saveSocial();
   d.dirty = false;
+  // start painting the new header (GIF banners take a few seconds) before anyone opens the profile
+  ctx.client?.users
+    .fetch(userId)
+    .then((user) => warmHeader(u.profile, user))
+    .catch(() => {});
 }
 
 /* --------------------------------- modals --------------------------------- */

@@ -120,6 +120,7 @@ async function rotationEntries(u, anilistId) {
     .map((e) => ({
       ...snapshot(e.media),
       progress: e.progress || 0,
+      listStatus: e.status || 'CURRENT',
       total: e.media.episodes || null,
       next: e.media.nextAiringEpisode || null,
       pinned: pinned.includes(e.media.id),
@@ -166,7 +167,10 @@ async function rotationBlocks(u, anilistId, { manage = false, limit = 6 } = {}) 
   if (!anilistId && !all.length) blocks.push(ui.text('*Link an AniList account with `/signin` to fill this automatically, or add shows by hand.*'));
   else if (!all.length) blocks.push(ui.text('*Nothing in rotation right now.*'));
   else {
-    const covers = ui.coverGallery(all.slice(0, 4).map((e) => ({ url: e.cover, description: e.title })));
+    const artRoutes = require('./artRoutes');
+    const url = artRoutes.rotationUrl(all.slice(0, artRoutes.ROTATION_CARDS));
+    const covers = url ? ui.gallery([{ url, description: all.slice(0, artRoutes.ROTATION_CARDS).map((e) => e.title).join(' · ') }]) : ui.coverGallery(all.slice(0, 4).map((e) => ({ url: e.cover, description: e.title })));
+    if (url) artRoutes.warm(url);
     if (covers) blocks.push(covers);
     blocks.push(...rotationRows(all.slice(0, limit), accent));
     if (all.length > limit) blocks.push(ui.text(`-# +${all.length - limit} more`));

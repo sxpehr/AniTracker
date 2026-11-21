@@ -14,7 +14,7 @@ const { guildConfig } = require('./guildConfig');
  *  └──────────────────────────────────────────────────────┘
  *
  * Pages: feed · recaps · members · other · health
- * ids: sv:open · sv:cat · sv:ch · sv:ping · sv:content · sv:mature · sv:rch ·
+ * ids: sv:open · sv:cat · sv:ch · sv:ping · sv:content · sv:mature · sv:burst · sv:rch ·
  *      sv:rch:same · sv:recaps · sv:tz · sv:lb · sv:rp:<week|month> ·
  *      sv:post:<week|month> · sv:auto · sv:perm · sv:relaunch · sv:role ·
  *      sv:role:auto · sv:nudge · sv:diag · sv:diag:now:<anilistId>
@@ -98,10 +98,19 @@ async function pageBlocks(page, interaction) {
     blocks.push(ui.text(ui.label('18+ titles')));
     blocks.push(
       ui.select('sv:mature', '18+ titles…', [
-        { label: 'Hide the art behind a spoiler', value: 'blur', emoji: '🌫️', description: 'Post it, but blur the cover and banner (default)', default: cfg.mature === 'blur' },
+        { label: 'Hide the cover', value: 'blur', emoji: '🌫️', description: 'Post it, but without the cover art (default)', default: cfg.mature === 'blur' },
         { label: 'Show normally', value: 'show', emoji: '👁️', default: cfg.mature === 'show' },
         { label: 'Don’t post them', value: 'skip', emoji: '🚫', default: cfg.mature === 'skip' },
       ])
+    );
+    blocks.push(ui.text(`${ui.label('Flood protection')}\n-# When someone has a pile of updates waiting (the bot was down, AniList was slow), only the newest few post on their own and the rest are bundled into one “caught up” post. Repeats of the same update are never posted twice.`));
+    const burst = Number(cfg.burst) || 3;
+    blocks.push(
+      ui.select(
+        'sv:burst',
+        'Separate posts per person at once…',
+        [1, 2, 3, 5, 8].map((n) => ({ label: `${n} post${n === 1 ? '' : 's'} at once, bundle the rest`, value: String(n), emoji: n === 3 ? '🛡️' : '📦', description: n === 3 ? 'Default' : undefined, default: burst === n }))
+      )
     );
   }
 
@@ -326,6 +335,9 @@ async function onComponent(interaction) {
       break;
     case 'mature':
       cfg.mature = ['show', 'blur', 'skip'].includes(v[0]) ? v[0] : 'blur';
+      break;
+    case 'burst':
+      cfg.burst = [1, 2, 3, 5, 8].includes(Number(v[0])) ? Number(v[0]) : 3;
       break;
     case 'rch':
       if (parts[2] === 'same') cfg.recapChannelId = null;

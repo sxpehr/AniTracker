@@ -1,20 +1,17 @@
 // What `/update` posts when no custom message is given. Edit this list
 // whenever you ship something worth telling servers about.
 const LATEST_UPDATE = {
-  title: '✨ AniTracker update — Recaps, a new look & admin settings',
+  title: '✨ AniTracker update — Leaderboards, rotation cards & recaps',
   items: [
-    '**🆕 New activity posts** — Discord’s modern layout: the anime’s banner, your profile status, and a progress bar for the season you’re on (“episode 7 of 12 · 58%”)',
-    '**🏷️ Real vibes, not vague genres** — posts and stats now use AniList tags like *Isekai*, *Satire* or *Iyashikei* instead of “Comedy, Adventure”',
-    '**📅 Weekly & 🗓️ monthly server recaps** — every Monday and on the 1st: most hours, episodes, different anime, completions, streaks and the server favourite',
-    '**🎁 Your monthly recap by DM** — with “share to a server” and “compare with another month”',
-    '**🗓️ /recap** — the last 6 months show up as choices, no typing',
-    '**🛡️ /serversettings** — admins pick the channel, recaps, leaderboards, auto-tracking, 18+ handling and more, plus a health check for profiles that aren’t posting',
-    '**⭐ Ratings** — tap ⭐ Rate on any post or use `/rate`; `/ratings` shows the server’s top rated, anyone’s ratings page, or everyone’s score for one anime',
-    '**🔎 /watched** — who here watched an anime (status, progress, score), what someone watched, or search everything the server watched',
-    '**💜 /recommendanimes** — now shows who voted for what',
-    '**🔧 Fixed** — updates that AniList merges into an older activity (or that never make an activity) now post too',
+    '**📺 Activity posts** — back to the classic look with your profile picture, now with your status, a progress bar for the season, AniList tags (*Isekai*, *Satire*…) and ⭐ Rate',
+    '**🔄 In Rotation** — your profile shows what you’re watching as cards: cover in a progress ring, season, episodes, status and tags',
+    '**🏆 Leaderboards** — profile pictures, progress bars and details for everyone, plus banners of what the server is watching',
+    '**😳 Freakiest board** — now lists the shows behind the numbers (still off unless admins turn it on)',
+    '**📅 Weekly & 🗓️ monthly recaps** — most hours with profile pictures, popular shows as banners',
+    '**🛡️ Flood protection** — if a pile of updates builds up, the newest post on their own and the rest come as one “caught up” post (admins: /serversettings)',
+    '**⭐ Ratings & 🔎 /watched** — progress bars and banners instead of stars and tiny covers',
   ],
-  footer: 'Admins: try /serversettings · everyone: /rate, /watched, /recap',
+  footer: 'Try /profile, /leaderboard and /recap · admins: /serversettings',
 };
 
 module.exports = { LATEST_UPDATE };

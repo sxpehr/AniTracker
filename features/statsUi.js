@@ -103,9 +103,15 @@ async function monthBlocks({ st, su, al, tz }, ym, { compact = false } = {}) {
   blocks.push(ui.divider());
   const top = sum.topAnime.slice(0, 5);
   blocks.push(ui.text(ui.label('Most watched')));
-  const g = ui.coverGallery(top.slice(0, 4).map((a) => ({ url: a.c, description: a.t })));
-  if (g) blocks.push(g);
-  blocks.push(ui.text(top.map((a, i) => `\`${String(i + 1).padStart(2, '0')}\` **${a.u ? `[${ui.esc(ui.clip(a.t, 60))}](${a.u})` : ui.esc(a.t)}** · ${a.eps} ep${a.eps === 1 ? '' : 's'}`).join('\n')));
+  const artRoutes = require('./artRoutes');
+  const bl = artRoutes.bannerListUrl(top.map((a) => ({ mediaId: a.mediaId, detail: `${a.eps} episode${a.eps === 1 ? '' : 's'} this month` })));
+  const g = bl ? ui.gallery([{ url: bl, description: top.map((a) => a.t).join(' · ') }]) : null;
+  if (g) {
+    artRoutes.warm(bl);
+    blocks.push(g);
+  }
+  const maxEps = top[0]?.eps || 0;
+  blocks.push(ui.text(top.map((a, i) => `\`${String(i + 1).padStart(2, '0')}\` **${a.u ? `[${ui.esc(ui.clip(a.t, 60))}](${a.u})` : ui.esc(a.t)}** · ${a.eps} ep${a.eps === 1 ? '' : 's'}${g ? '' : `\n\`${ui.bar(a.eps, maxEps, 12)}\``}`).join('\n')));
   if (sum.topTags.length) {
     blocks.push(ui.text(`${ui.label('Your vibe this month')}\n${genreBars(sum.topTags.map((x) => ({ name: x.genre, value: x.eps })))}`));
   }
@@ -262,13 +268,30 @@ async function recapPayload(ownerId, viewerId, ym, { shareable = true } = {}) {
   );
   children.push(ui.divider());
   if (top) {
-    children.push(ui.row([ui.label('Your #1 anime'), `### ${top.u ? `[${ui.esc(top.t)}](${top.u})` : ui.esc(top.t)}`, `-# ${top.eps} episode${top.eps === 1 ? '' : 's'} this month`], top.c));
+    const artRoutes = require('./artRoutes');
+    // The #1 is already the banner at the top; list the rest as banners.
+    const five = sum.topAnime.slice(base ? 1 : 0, 5);
+    children.push(ui.text(`${ui.label('Your #1 anime')}\n### ${top.u ? `[${ui.esc(top.t)}](${top.u})` : ui.esc(top.t)}\n-# ${top.eps} episode${top.eps === 1 ? '' : 's'} this month`));
+    const bl = five.length ? artRoutes.bannerListUrl(five.map((a) => ({ mediaId: a.mediaId, detail: `${a.eps} episode${a.eps === 1 ? '' : 's'}` })), 'Also on repeat', { start: base ? 2 : 1 }) : null;
+    const gal = bl ? ui.gallery([{ url: bl, description: five.map((a) => a.t).join(' · ') }]) : null;
+    if (gal) {
+      artRoutes.warm(bl);
+      children.push(gal);
+    } else if (five.length) {
+      const maxEps = top.eps || 0;
+      children.push(ui.text(`${ui.label('Also on repeat')}\n${five.map((a) => `\`${ui.bar(a.eps, maxEps, 10)}\` **${ui.esc(ui.clip(a.t, 50))}** · ${a.eps} eps`).join('\n')}`));
+    }
   }
-  const rest = sum.topAnime.slice(1, 5);
-  if (rest.length) {
-    children.push(ui.text(ui.label('Also on repeat')));
-    const gal = ui.coverGallery(rest.map((a) => ({ url: a.c, description: a.t })), { single: 'row' });
-    if (gal) children.push(gal);
+  // Freaky corner: the ecchi / fan-service shows this month, if any.
+  const freaky = Object.entries(g.su?.months?.[ym]?.a || {})
+    .filter(([id]) => {
+      const sm = g.st.media?.[id];
+      return sm && (sm.fr ?? ((sm.g || []).includes('Ecchi') ? 1 : 0));
+    })
+    .map(([id, eps]) => ({ t: g.st.media[id].t, eps }))
+    .sort((a, b) => b.eps - a.eps);
+  if (freaky.length) {
+    children.push(ui.text(`${ui.label('Freaky corner 😳')}\n${freaky.slice(0, 4).map((x) => `**${ui.esc(ui.clip(x.t, 50))}** · ${x.eps} eps`).join('  ·  ')}`));
   }
   if (sum.topTags.length) {
     children.push(
@@ -294,14 +317,14 @@ async function recapPayload(ownerId, viewerId, ym, { shareable = true } = {}) {
 /* ------------------------------ leaderboards ------------------------------ */
 
 const BOARDS = {
-  episodes: { label: 'Episodes this month', emoji: '📺', unit: 'eps' },
-  streak: { label: 'Current streak', emoji: '🔥', unit: 'days' },
-  completed: { label: 'Completed this month', emoji: '✅', unit: 'done' },
-  recommendations: { label: 'Recommendations', emoji: '💜', unit: 'recs' },
-  reviews: { label: 'Reviews written', emoji: '✍️', unit: 'reviews' },
-  helpful: { label: 'Most helpful reviewers', emoji: '❤️', unit: 'likes' },
-  ratings: { label: 'Most anime rated', emoji: '⭐', unit: 'rated' },
-  freaky: { label: 'Freakiest in the server', emoji: '😳', unit: 'ecchi eps', adminNote: 'Off by default · counts ecchi / fan-service episodes', optIn: true },
+  episodes: { label: 'Episodes this month', emoji: '📺', unit: 'eps', accent: 0x3db4f2 },
+  streak: { label: 'Current streak', emoji: '🔥', unit: 'days', accent: 0xf97316 },
+  completed: { label: 'Completed this month', emoji: '✅', unit: 'done', accent: 0x22c55e },
+  recommendations: { label: 'Recommendations', emoji: '💜', unit: 'recs', accent: 0xa855f7 },
+  reviews: { label: 'Reviews written', emoji: '✍️', unit: 'reviews', accent: 0x38bdf8 },
+  helpful: { label: 'Most helpful reviewers', emoji: '❤️', unit: 'likes', accent: 0xf43f5e },
+  ratings: { label: 'Most anime rated', emoji: '⭐', unit: 'rated', accent: 0xfacc15 },
+  freaky: { label: 'Freakiest in the server', emoji: '😳', unit: 'ecchi eps', accent: 0xec4899, adminNote: 'Off by default · counts ecchi / fan-service episodes', optIn: true },
 };
 
 // Boards switched on in a server. Opt-in boards (freaky) stay off until an admin turns them on.
@@ -318,20 +341,65 @@ function freakyEpisodes(su) {
   return n;
 }
 
-async function leaderboardPayload(guildId, board) {
+// Shows someone watched that count as "freaky", most episodes first.
+function freakyShows(st, su) {
+  const per = {};
+  for (const m of Object.values(su?.months || {})) {
+    for (const [id, eps] of Object.entries(m.a || {})) {
+      const sm = st.media?.[id];
+      if (!sm) continue;
+      const freaky = sm.fr ?? ((sm.g || []).includes('Ecchi') || (sm.g || []).includes('Hentai') ? 1 : 0);
+      if (freaky) per[id] = (per[id] || 0) + eps;
+    }
+  }
+  return Object.entries(per)
+    .map(([id, eps]) => ({ mediaId: Number(id), eps, title: st.media[id]?.t || 'Unknown' }))
+    .sort((a, b) => b.eps - a.eps);
+}
+
+// Display names for a server's members (nickname > global name > username).
+async function memberNames(guildId, ids) {
+  const out = {};
+  const guild = ctx.client?.guilds?.cache.get(guildId);
+  const want = [...new Set(ids.filter(Boolean))];
+  if (guild?.members?.cache && want.length) {
+    try {
+      const missing = want.filter((id) => !guild.members.cache.has(id));
+      if (missing.length) await guild.members.fetch({ user: missing.slice(0, 100) }).catch(() => null);
+      for (const id of want) {
+        const m = guild.members.cache.get(id);
+        if (m) out[id] = m.displayName;
+      }
+    } catch {
+      /* names fall back below */
+    }
+  }
+  for (const id of want) {
+    if (out[id]) continue;
+    const u = ctx.client?.users?.cache.get(id);
+    if (u) out[id] = u.globalName || u.username;
+  }
+  return out;
+}
+
+/**
+ * The rows behind a leaderboard (used by the card and its image).
+ * @returns { board, enabled, offNote, subtitle, rows: [{ discordId, anilistId, name, fallbackName, avatar, value, detail, shows }] }
+ */
+async function leaderboardRows(guildId, board) {
   const core = await ctx.loadData();
   const s = await ctx.loadSocial();
   const st = await ctx.loadStats();
   const enabled = guildBoards(s, guildId);
-  if (!enabled.length) return ui.fit([ui.card(ui.ANILIST_BLUE, [ui.text('### 🏆 Leaderboards are switched off in this server.\n-# A server manager can turn them on in `/settings` → Server.')])]);
   let offNote = null;
-  if (!enabled.includes(board)) {
+  if (enabled.length && !enabled.includes(board)) {
     if (BOARDS[board]) offNote = `-# ${BOARDS[board].emoji} ${BOARDS[board].label} is switched off in this server — admins can turn it on in \`/serversettings\` → Recaps & leaderboards.`;
     board = enabled[0];
   }
-
-  let rows = [];
   const guildData = core.guilds[guildId] || { users: [] };
+  const linkedAvatar = (discordId) => core.linkedAccounts?.[discordId]?.avatar || null;
+  let rows = [];
+
   if (['episodes', 'streak', 'completed', 'freaky'].includes(board)) {
     const seen = new Set();
     for (const t of guildData.users || []) {
@@ -342,42 +410,158 @@ async function leaderboardPayload(guildId, board) {
       const tz = (ownerId && s.users[ownerId]?.prefs?.timezone) || social.DEFAULT_TZ;
       if (ownerId && s.users[ownerId] && !social.canView(social.peekUser(s, ownerId), null, ownerId, 'stats')) continue;
       const ym = engine.monthKey(engine.dayKey(new Date(), tz));
+      const month = su?.months?.[ym];
+      const topOf = (m) => {
+        const best = Object.entries(m?.a || {}).sort((a, b) => b[1] - a[1])[0];
+        return best ? st.media?.[best[0]]?.t : null;
+      };
       let value = 0;
-      if (board === 'episodes') value = su?.months?.[ym]?.e || 0;
-      if (board === 'completed') value = su?.months?.[ym]?.c || 0;
-      if (board === 'streak') value = engine.streakOf(su, tz).current;
-      if (board === 'freaky') value = freakyEpisodes(su);
-      rows.push({ who: ownerId ? `<@${ownerId}>` : `**${ui.esc(t.username)}**`, value });
+      let detail = '';
+      let shows = null;
+      if (board === 'episodes') {
+        value = month?.e || 0;
+        const top = topOf(month);
+        detail = [top ? `Top: ${top}` : null, month ? `${Object.keys(month.a || {}).length} anime` : null, month?.m ? `${ui.hours(month.m)} h` : null].filter(Boolean).join(' · ');
+      }
+      if (board === 'completed') {
+        value = month?.c || 0;
+        detail = month ? `${Object.keys(month.a || {}).length} anime · ${ui.num(month.e || 0)} eps this month` : '';
+      }
+      if (board === 'streak') {
+        const sk = engine.streakOf(su, tz);
+        value = sk.current;
+        detail = `Best ever: ${sk.longest} day${sk.longest === 1 ? '' : 's'}${topOf(month) ? ` · lately: ${topOf(month)}` : ''}`;
+      }
+      if (board === 'freaky') {
+        value = freakyEpisodes(su);
+        shows = freakyShows(st, su);
+        detail = shows.length ? shows.slice(0, 3).map((x) => x.title).join(', ') : '';
+      }
+      rows.push({ discordId: ownerId, anilistId: t.id, fallbackName: t.username, avatar: t.avatar || linkedAvatar(ownerId), value, detail, shows });
     }
   } else {
+    const ratings = require('./ratings');
     const members = Object.entries(s.users).filter(([, u]) => (u.guilds || []).includes(guildId));
     for (const [uid, u] of members) {
       let value = 0;
-      if (board === 'recommendations') value = (u.recommendations || []).length;
-      if (board === 'reviews') value = Object.values(s.reviews).filter((r) => r.authorId === uid).length;
-      if (board === 'helpful') value = Object.values(s.reviews).filter((r) => r.authorId === uid).reduce((a, r) => a + (r.likes?.length || 0), 0);
-      if (board === 'ratings') value = require('./ratings').ratingsOf(s, uid).size;
-      rows.push({ who: `<@${uid}>`, value });
+      let detail = '';
+      const mine = Object.values(s.reviews).filter((r) => r.authorId === uid);
+      if (board === 'recommendations') {
+        value = (u.recommendations || []).length;
+        detail = (u.recommendations || []).slice(0, 3).map((e) => e.title).join(', ');
+      }
+      if (board === 'reviews') {
+        value = mine.length;
+        const latest = mine.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
+        detail = latest ? `Latest: ${latest.mediaTitle}` : '';
+      }
+      if (board === 'helpful') {
+        value = mine.reduce((a, r) => a + (r.likes?.length || 0), 0);
+        detail = `${mine.length} review${mine.length === 1 ? '' : 's'}`;
+      }
+      if (board === 'ratings') {
+        const map = ratings.ratingsOf(s, uid);
+        value = map.size;
+        if (map.size) {
+          const all = [...map.values()];
+          const avg = all.reduce((a, r) => a + r.s, 0) / all.length;
+          const best = all.sort((a, b) => b.s - a.s)[0];
+          detail = `Average ${avg.toFixed(1)}${best?.t ? ` · top: ${best.t}` : ''}`;
+        }
+      }
+      const al = social.anilistFor(core, uid);
+      rows.push({ discordId: uid, anilistId: al?.id || null, fallbackName: al?.name || null, avatar: linkedAvatar(uid), value, detail });
     }
   }
   rows = rows.filter((r) => r.value > 0).sort((a, b) => b.value - a.value).slice(0, 10);
+  const names = await memberNames(guildId, rows.map((r) => r.discordId));
+  for (const r of rows) {
+    r.name = (r.discordId && names[r.discordId]) || r.fallbackName || 'Someone';
+    if (!r.avatar && r.discordId) {
+      const u = ctx.client?.users?.cache.get(r.discordId);
+      r.avatar = u ? u.displayAvatarURL({ extension: 'png', size: 128 }) : null;
+    }
+  }
+  const subtitle =
+    board === 'freaky'
+      ? 'All-time ecchi & fan-service episodes · just for fun'
+      : board === 'episodes' || board === 'completed'
+        ? `${engine.monthName(engine.monthKey(engine.dayKey(new Date(), social.DEFAULT_TZ)))} · resets every month`
+        : 'Friendly competition · your own stats matter more';
+  return { board, enabled, offNote, subtitle, rows };
+}
+
+async function leaderboardPayload(guildId, board) {
+  const s = await ctx.loadSocial();
+  if (!guildBoards(s, guildId).length) return ui.fit([ui.card(ui.ANILIST_BLUE, [ui.text('### 🏆 Leaderboards are switched off in this server.\n-# A server manager can turn them on in `/serversettings` → Recaps & leaderboards.')])]);
+  const res = await leaderboardRows(guildId, board);
+  board = res.board;
   const meta = BOARDS[board];
-  const medals = ['🥇', '🥈', '🥉'];
-  const max = rows[0]?.value || 0;
-  const lines = rows.map((r, i) => `${medals[i] || `\`#${i + 1}\``} ${r.who}\n${ui.bar(r.value, max, 12)}  **${ui.num(r.value)}** ${meta.unit}`);
-  const children = [
-    ui.text(
-      `### 🏆 ${meta.emoji} ${meta.label}\n-# ${
-        board === 'freaky' ? 'All-time ecchi & fan-service episodes · just for fun 😳' : `${board === 'episodes' || board === 'completed' ? 'Resets every month · ' : ''}friendly competition — your own stats matter more`
-      }`
-    ),
-    ui.divider(),
-    offNote ? ui.text(offNote) : null,
-    ui.text(lines.length ? lines.join('\n') : '*Nobody on the board yet — get watching!*'),
-    ui.divider(),
-    ui.select('lb:c', 'Switch leaderboard…', enabled.map((k) => ({ label: BOARDS[k].label, value: k, emoji: BOARDS[k].emoji, default: k === board }))),
-  ];
-  return ui.fit([ui.card(ui.ANILIST_BLUE, children)]);
+  const { rows } = res;
+  const artRoutes = require('./artRoutes');
+  const children = [ui.text(`### 🏆 ${meta.emoji} ${meta.label}\n-# ${res.subtitle}`)];
+  if (res.offNote) children.push(ui.text(res.offNote));
+
+  const url = artRoutes.leaderboardUrl(guildId, board, rows);
+  const g = url ? ui.gallery([{ url, description: `${meta.label}: ${rows.slice(0, 3).map((r) => r.name).join(', ')}` }]) : null;
+  if (g) {
+    artRoutes.warm(url);
+    children.push(g);
+    // Clickable names under the picture (mentions never ping).
+    const who = rows.slice(0, 10).map((r, i) => `\`${i + 1}\` ${r.discordId ? `<@${r.discordId}>` : `**${ui.esc(r.name)}**`} ${ui.num(r.value)}`);
+    if (who.length) children.push(ui.text(`-# ${who.join('  ·  ')}`));
+  } else {
+    const max = rows[0]?.value || 0;
+    const lines = rows.map((r, i) => `\`#${i + 1}\` ${r.discordId ? `<@${r.discordId}>` : `**${ui.esc(r.name)}**`}  **${ui.num(r.value)}** ${meta.unit}\n\`${ui.bar(r.value, max, 14)}\`${r.detail ? `  -# ${ui.esc(ui.clip(r.detail, 70))}` : ''}`);
+    children.push(ui.text(lines.length ? lines.join('\n') : '*Nobody on the board yet — get watching!*'));
+  }
+
+  // Freaky board: the shows behind it, as banners.
+  if (board === 'freaky' && rows.length) {
+    const per = new Map();
+    for (const r of rows) {
+      for (const sh of r.shows || []) {
+        const x = per.get(sh.mediaId) || { mediaId: sh.mediaId, title: sh.title, eps: 0, who: [] };
+        x.eps += sh.eps;
+        x.who.push(`${r.name} ${sh.eps}`);
+        per.set(sh.mediaId, x);
+      }
+    }
+    const top = [...per.values()].sort((a, b) => b.eps - a.eps).slice(0, 5);
+    const bl = artRoutes.bannerListUrl(top.map((x) => ({ mediaId: x.mediaId, detail: `${x.eps} eps · ${x.who.slice(0, 3).join(' · ')}` })), 'The freaky picks');
+    const bg = bl ? ui.gallery([{ url: bl, description: top.map((x) => x.title).join(' · ') }]) : null;
+    if (bg) {
+      artRoutes.warm(bl);
+      children.push(bg);
+    } else if (top.length) children.push(ui.text(`${ui.label('The freaky picks')}\n${top.map((x, i) => `\`${i + 1}\` **${ui.esc(x.title)}** · ${x.eps} eps`).join('\n')}`));
+  }
+
+  // Episodes board: what the server watched most this month, as banners.
+  if (board === 'episodes' && rows.length) {
+    const st = await ctx.loadStats();
+    const per = new Map();
+    for (const r of rows) {
+      const su = st.users[String(r.anilistId)];
+      const ym = engine.monthKey(engine.dayKey(new Date(), social.DEFAULT_TZ));
+      for (const [id, eps] of Object.entries(su?.months?.[ym]?.a || {})) {
+        const x = per.get(id) || { mediaId: Number(id), eps: 0, watchers: 0 };
+        x.eps += eps;
+        x.watchers += 1;
+        per.set(id, x);
+      }
+    }
+    const top = [...per.values()].sort((a, b) => b.watchers - a.watchers || b.eps - a.eps).slice(0, 3);
+    const bl = artRoutes.bannerListUrl(top.map((x) => ({ mediaId: x.mediaId, detail: `${x.watchers} watching · ${x.eps} ep${x.eps === 1 ? '' : 's'} this month` })), 'Most watched here this month');
+    const bg = bl ? ui.gallery([{ url: bl, description: 'Most watched this month' }]) : null;
+    if (bg) {
+      artRoutes.warm(bl);
+      children.push(bg);
+    }
+  }
+
+  children.push(ui.divider());
+  children.push(ui.select('lb:c', 'Switch leaderboard…', res.enabled.map((k) => ({ label: BOARDS[k].label, value: k, emoji: BOARDS[k].emoji, default: k === board }))));
+  return ui.fit([ui.card(meta.accent || ui.ANILIST_BLUE, children)]);
 }
 
 /* -------------------------------- handlers -------------------------------- */
@@ -445,6 +629,9 @@ module.exports = {
   statsPayload,
   recapPayload,
   leaderboardPayload,
+  leaderboardRows,
+  freakyShows,
+  memberNames,
   guildBoards,
   BOARDS,
   gather,

@@ -216,14 +216,15 @@ function longestInMonth(su, ym) {
 function monthSummary(stats, su, ym) {
   const m = su?.months?.[ym];
   if (!m) return null;
-  const topAnime = Object.entries(m.a)
+  const topAnime = Object.entries(m.a || {})
     .sort((a, b) => b[1] - a[1])
     .map(([id, eps]) => ({ mediaId: Number(id), eps, ...(stats.media[id] || {}) }));
-  const topGenres = Object.entries(m.g)
+  const topGenres = Object.entries(m.g || {})
     .sort((a, b) => b[1] - a[1])
     .map(([genre, eps]) => ({ genre, eps }));
   const days = Object.keys(su.days || {}).filter((d) => d.startsWith(ym) && su.days[d][0]).length;
-  const wd = m.w.indexOf(Math.max(...m.w));
+  const week = Array.isArray(m.w) && m.w.length === 7 ? m.w : [0, 0, 0, 0, 0, 0, 0];
+  const wd = week.indexOf(Math.max(...week));
   // Specific tags (Isekai, Satire…) when we have them; genres for older months.
   const topTags = Object.entries(m.t || {})
     .sort((a, b) => b[1] - a[1])

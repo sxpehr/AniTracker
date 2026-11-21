@@ -83,6 +83,31 @@ async function getMediaLite(id) {
   });
 }
 
+// Several shows in one request, with tags (art cards: rotation, banner lists).
+// Fills the same cache getMediaLite uses.
+const batchCache = cached('mediaBatch', 30 * 60 * 1000, 800);
+async function getMediaBatch(ids) {
+  const want = [...new Set(ids.map(Number).filter((n) => n > 0))].slice(0, 50);
+  const out = new Map();
+  const missing = [];
+  for (const id of want) {
+    const hit = caches.get('mediaBatch')?.get(id);
+    if (hit && Date.now() - hit.at < 30 * 60 * 1000) out.set(id, hit.value);
+    else missing.push(id);
+  }
+  if (missing.length) {
+    const data = await anilistQuery(
+      `query ($ids: [Int]) { Page(perPage: 50) { media(id_in: $ids) { ${MEDIA_FIELDS} tags { name rank category isMediaSpoiler isGeneralSpoiler isAdult } nextAiringEpisode { episode airingAt } } } }`,
+      { ids: missing }
+    );
+    for (const m of data.data.Page?.media || []) {
+      out.set(m.id, await batchCache(m.id, async () => m));
+      await mediaCache(m.id, async () => m);
+    }
+  }
+  return out;
+}
+
 // Lifetime statistics + what they're currently watching, in ONE request.
 const snapshotCache = cached('profileSnapshot', 5 * 60 * 1000, 300);
 async function getProfileSnapshot(anilistId) {
@@ -109,6 +134,7 @@ async function getProfileSnapshot(anilistId) {
         }
         current: Page(perPage: 15) {
           mediaList(userId: $id, type: ANIME, status_in: [CURRENT, REPEATING], sort: UPDATED_TIME_DESC) {
+            status
             progress
             updatedAt
             media { ${MEDIA_FIELDS} nextAiringEpisode { episode airingAt } }
@@ -250,6 +276,7 @@ module.exports = {
   snapshot,
   searchAnime,
   getMediaLite,
+  getMediaBatch,
   getProfileSnapshot,
   getCompletedBetween,
   getOpenings,

@@ -121,6 +121,44 @@ function podium(rows, value, fmt) {
   return top.map(({ r, place }) => `${MEDALS[place]} ${who(r.p)} ${fmt(value(r))}`).join('  ·  ');
 }
 
+function isFreakyMedia(st, id) {
+  const sm = st.media?.[id];
+  if (!sm) return false;
+  return Boolean(sm.fr ?? ((sm.g || []).includes('Ecchi') || (sm.g || []).includes('Hentai')));
+}
+
+// Who watched the most hours, as rows for the leaderboard image.
+async function hoursBoard(guildId, kind, key) {
+  const core = await ctx.loadData();
+  const s = await ctx.loadSocial();
+  const st = await ctx.loadStats();
+  const rows = participants(core, s, st, guildId)
+    .map((p) => ({ p, sum: periodSummary(st, p.su, kind, key) }))
+    .filter((r) => r.sum && r.sum.minutes > 0)
+    .sort((a, b) => b.sum.minutes - a.sum.minutes)
+    .slice(0, 8);
+  if (!rows.length) return null;
+  const names = await require('./statsUi').memberNames(guildId, rows.map((r) => r.p.ownerId));
+  const tracked = new Map((core.guilds[guildId]?.users || []).map((t) => [t.id, t.avatar]));
+  return {
+    title: `Most hours · ${periodTitle(kind, key)}`,
+    subtitle: `${kind === 'week' ? 'Weekly' : 'Monthly'} recap · ${ctx.client?.guilds.cache.get(guildId)?.name || 'this server'}`,
+    unit: 'hours',
+    accent: kind === 'week' ? WEEKLY_ACCENT : MONTHLY_ACCENT,
+    rows: rows.map((r) => {
+      const top = Object.entries(r.sum.anime || {}).sort((a, b) => b[1] - a[1])[0];
+      return {
+        name: (r.p.ownerId && names[r.p.ownerId]) || r.p.name,
+        fallbackName: r.p.name,
+        avatar: tracked.get(r.p.anilistId) || core.linkedAccounts?.[r.p.ownerId]?.avatar || null,
+        value: r.sum.minutes,
+        valueText: ui.hours(r.sum.minutes),
+        detail: [`${ui.num(r.sum.episodes)} eps`, `${r.sum.animeCount} anime`, r.sum.completed ? `${r.sum.completed} done` : null, top ? `top: ${st.media?.[top[0]]?.t || ''}` : null].filter(Boolean).join(' · '),
+      };
+    }),
+  };
+}
+
 /**
  * The server recap card (weekly or monthly). Returns null when nobody in the
  * server watched anything that period.
@@ -175,20 +213,31 @@ async function serverRecapPayload(guildId, kind, key, { preview = false } = {}) 
   );
   children.push(ui.divider(true));
 
-  // Main board: hours, with bars.
+  // Main board: hours — an image with avatars and bars (text if images are off).
   const byHours = rows.slice().sort((a, b) => b.sum.minutes - a.sum.minutes);
-  const maxMin = byHours[0].sum.minutes;
-  children.push(
-    ui.text(
-      `### ⏱️ Most hours watched\n${placed(byHours, (r) => r.sum.minutes)
-        .slice(0, 5)
-        .map(
-          ({ r, place }) =>
-            `${MEDALS[place] || `\`#${place + 1}\``} ${who(r.p)}  ·  **${ui.hours(r.sum.minutes)} h**\n-# \`${ui.bar(r.sum.minutes, maxMin, 14)}\`  ${ui.num(r.sum.episodes)} eps · ${r.sum.animeCount} anime${r.sum.completed ? ` · ${r.sum.completed} completed` : ''}`
-        )
-        .join('\n')}${byHours.length > 5 ? `\n-# +${byHours.length - 5} more watching` : ''}`
-    )
-  );
+  const artRoutes = require('./artRoutes');
+  const board = await hoursBoard(guildId, kind, key);
+  const boardUrl = board ? artRoutes.recapBoardUrl(guildId, kind, key, board.rows) : null;
+  const boardImg = boardUrl ? ui.gallery([{ url: boardUrl, description: `Most hours: ${board.rows.slice(0, 3).map((r) => r.name).join(', ')}` }]) : null;
+  if (boardImg) {
+    artRoutes.warm(boardUrl);
+    children.push(ui.text('### ⏱️ Most hours watched'));
+    children.push(boardImg);
+    children.push(ui.text(`-# ${placed(byHours, (r) => r.sum.minutes).slice(0, 5).map(({ r, place }) => `\`${place + 1}\` ${who(r.p)} ${ui.hours(r.sum.minutes)}h`).join('  ·  ')}`));
+  } else {
+    const maxMin = byHours[0].sum.minutes;
+    children.push(
+      ui.text(
+        `### ⏱️ Most hours watched\n${placed(byHours, (r) => r.sum.minutes)
+          .slice(0, 5)
+          .map(
+            ({ r, place }) =>
+              `${MEDALS[place] || `\`#${place + 1}\``} ${who(r.p)}  ·  **${ui.hours(r.sum.minutes)} h**\n-# \`${ui.bar(r.sum.minutes, maxMin, 14)}\`  ${ui.num(r.sum.episodes)} eps · ${r.sum.animeCount} anime${r.sum.completed ? ` · ${r.sum.completed} completed` : ''}`
+          )
+          .join('\n')}${byHours.length > 5 ? `\n-# +${byHours.length - 5} more watching` : ''}`
+      )
+    );
+  }
   children.push(ui.divider());
 
   // Category podiums.
@@ -204,24 +253,66 @@ async function serverRecapPayload(guildId, kind, key, { preview = false } = {}) 
   if (fav) {
     children.push(ui.divider());
     children.push(
-      ui.row(
+      ui.text(
         [
           ui.label(weekly ? 'Server favourite this week' : 'Server favourite this month'),
           `### ${fav.u ? `[${ui.esc(ui.clip(fav.t || 'Unknown', 70))}](${fav.u})` : ui.esc(fav.t || 'Unknown')}`,
           `-# watched by **${fav.watchers}** ${fav.watchers === 1 ? 'person' : 'people'} · ${ui.num(fav.eps)} episodes`,
-        ],
-        fav.c
+        ].join('\n')
       )
     );
     const more = topShows.slice(1, 5);
     if (more.length) {
+      const bl = artRoutes.bannerListUrl(more.map((x) => ({ mediaId: x.id, detail: `${x.watchers} watching · ${ui.num(x.eps)} ep${x.eps === 1 ? '' : 's'}` })), 'Also popular', { start: 2 });
+      const bg = bl ? ui.gallery([{ url: bl, description: more.map((x) => x.t).join(' · ') }]) : null;
+      if (bg) {
+        artRoutes.warm(bl);
+        children.push(bg);
+      } else {
+        children.push(
+          ui.text(
+            `${ui.label('Also popular')}\n${more
+              .map((x, i) => `\`${String(i + 2).padStart(2, '0')}\` ${x.u ? `[${ui.esc(ui.clip(x.t || 'Unknown', 55))}](${x.u})` : ui.esc(x.t || 'Unknown')} · ${x.watchers} watching · ${x.eps} eps`)
+              .join('\n')}`
+          )
+        );
+      }
+    }
+  }
+
+  // Freakiest this period (only where admins turned that board on).
+  const freakyOn = require('./statsUi').guildBoards(s, guildId).includes('freaky');
+  if (freakyOn) {
+    const fr = rows
+      .map((r) => {
+        const shows = Object.entries(r.sum.anime || {})
+          .filter(([id]) => isFreakyMedia(st, id))
+          .map(([id, eps]) => ({ id: Number(id), eps, t: st.media[id]?.t || 'Unknown' }))
+          .sort((a, b) => b.eps - a.eps);
+        return { r, shows, eps: shows.reduce((a, x) => a + x.eps, 0) };
+      })
+      .filter((x) => x.eps > 0)
+      .sort((a, b) => b.eps - a.eps);
+    if (fr.length) {
+      children.push(ui.divider());
+      const maxF = fr[0].eps;
       children.push(
         ui.text(
-          `${ui.label('Also popular')}\n${more
-            .map((x, i) => `\`${String(i + 2).padStart(2, '0')}\` ${x.u ? `[${ui.esc(ui.clip(x.t || 'Unknown', 55))}](${x.u})` : ui.esc(x.t || 'Unknown')} · ${x.watchers} watching · ${x.eps} eps`)
+          `### 😳 Freakiest ${weekly ? 'this week' : 'this month'}\n${fr
+            .slice(0, 3)
+            .map((x, i) => `\`${i + 1}\` ${who(x.r.p)} **${x.eps}** eps  \`${ui.bar(x.eps, maxF, 10)}\`\n-# ${x.shows.slice(0, 3).map((sh) => ui.esc(ui.clip(sh.t, 40))).join(', ')}`)
             .join('\n')}`
         )
       );
+      const shows = new Map();
+      for (const x of fr) for (const sh of x.shows) shows.set(sh.id, { ...sh, eps: (shows.get(sh.id)?.eps || 0) + sh.eps });
+      const picks = [...shows.values()].sort((a, b) => b.eps - a.eps).slice(0, 3);
+      const bl = artRoutes.bannerListUrl(picks.map((x) => ({ mediaId: x.id, detail: `${x.eps} ep${x.eps === 1 ? '' : 's'}` })), 'The freaky picks');
+      const bg = bl ? ui.gallery([{ url: bl, description: picks.map((x) => x.t).join(' · ') }]) : null;
+      if (bg) {
+        artRoutes.warm(bl);
+        children.push(bg);
+      }
     }
   }
   if (vibe.length) children.push(ui.text(`${ui.label('The vibe')}\n🏷️ ${vibe.map((t) => `\`${t}\``).join(' ')}`));
@@ -541,4 +632,4 @@ async function onComponent(interaction) {
   }
 }
 
-module.exports = { _participants: participants, runScheduled, serverRecapPayload, postServerRecap, personalRecap, comparePayload, recapControls, attachRows, onComponent, periodTitle, sendPersonalRecaps };
+module.exports = { hoursBoard, _participants: participants, runScheduled, serverRecapPayload, postServerRecap, personalRecap, comparePayload, recapControls, attachRows, onComponent, periodTitle, sendPersonalRecaps };

@@ -1,29 +1,15 @@
-const { ButtonBuilder, ButtonStyle, ThumbnailBuilder, SectionBuilder, MessageFlags } = require('discord.js');
+const { ButtonBuilder, ButtonStyle, EmbedBuilder, MessageFlags } = require('discord.js');
 const ui = require('./ui');
 const social = require('./social');
 const { pickTags } = require('./tags');
-const { barUrl, paletteFor, publicUrl } = require('./themes');
+const { paletteFor } = require('./themes');
 
 /* ---------------------------------------------------------------------------
- * Activity posts, in Discord's modern layout (Components V2).
- *
- *  ┌─────────────────────────────────────────────┐
- *  │ [ anime banner ]                             │  full style
- *  │ ✦ Sep 🔥 5 · “currently losing to backlog”   │
- *  │ Watched episode 7 · Season 2 ▶️       [cover]│
- *  │ # Title                                      │
- *  │ EPISODE 7 OF 12 · 58%                        │
- *  │ [▰▰▰▰▰▰▱▱▱▱ progress bar]                    │
- *  │ ⭐ 8.4 · 🏷️ Isekai · Satire · ❤️ #12          │
- *  │ short synopsis…                              │
- *  │ ───────────────────────────────────────────  │
- *  │ [🤍 Like] [✍️ Review] [🗂️ Save] [📊 Info]    │
- *  │ 2m ago · tracked by @someone                 │
- *  └─────────────────────────────────────────────┘
- *
+ * Activity posts: the classic embed look (author avatar, big cover), plus the
+ * newer details: profile status, a progress bar for the season, specific
+ * tags, the server's community score, and the ⭐ Rate button.
  * The owner's /settings still decide the style (full/compact/minimal), the
- * colour, and which details show. New in this layout: their profile status
- * (tagline) and a progress bar for the season they're watching.
+ * colour, and which details show.
  * ------------------------------------------------------------------------- */
 
 const NEW_FIELDS = ['progress', 'status']; // added after people had saved settings
@@ -101,12 +87,6 @@ function showSet(a) {
   return show;
 }
 
-function thumb(url, spoiler) {
-  const t = new ThumbnailBuilder().setURL(ui.hd(url));
-  if (spoiler) t.setSpoiler(true);
-  return t;
-}
-
 function likeButton(rootId, likeCount) {
   return new ButtonBuilder()
     .setCustomId(`like_${rootId}`)
@@ -151,7 +131,22 @@ function stripMarkup(text) {
 }
 
 /**
+ * Classic activity post (an embed), with the newer details folded in.
+ *
+ *  ┌──────────────────────────────────────────────┐
+ *  │ (avatar) ✦ Sep 🔥 5 — “losing to my backlog”  │  author line, links to AniList
+ *  │ Watched episode 7 · Season 2 ▶️               │
+ *  │ # Title                                       │
+ *  │ ▰▰▰▰▰▰▰▱▱▱▱▱  7 / 12 · 58% · ep 8 in 3 days  │  progress through this season
+ *  │ ⭐ 8.4/10 • 🏷️ Isekai, Satire • 👥 8.3 here    │
+ *  │ short synopsis…                               │
+ *  │ [ big cover ]                                 │  full style (thumbnail otherwise)
+ *  │ AniList · today at 4:12                       │
+ *  └──────────────────────────────────────────────┘
+ *  [🤍 Like] [⭐ Rate] [✍️ Review] [🗂️ Save] [📊 More info]
+ *
  * @param o.username     AniList name
+ * @param o.avatarUrl    AniList avatar (author icon)
  * @param o.activity     AniList activity (or a feed.js event shaped like one)
  * @param o.streak       current streak (days)
  * @param o.seasonInfo   { season, rootId, rootTitle, rootSiteUrl, popularityRank }
@@ -170,103 +165,111 @@ function buildActivityPost(o) {
   const show = showSet(a);
   const style = a.style || 'full';
   const profileUrl = `https://anilist.co/user/${encodeURIComponent(username)}`;
-  const when = activity.createdAt ? `<t:${Math.floor(activity.createdAt)}:R>` : '';
-
-  const badges = ownerId ? social.badgesFor(ownerId).map((b) => ` \`${b.label}\``).join('') : '';
-  const tagline = show.has('status') && look?.profile?.tagline ? `  ·  *${ui.softEsc(ui.clip(look.profile.tagline, 80))}*` : '';
-  const streakBit = show.has('streak') && streak > 0 ? `  🔥 ${streak}` : '';
-  const author = `-# ✦ **[${ui.esc(username)}](${profileUrl})**${badges}${streakBit}${tagline}`;
-  const footerBits = [when, mentionId ? `tracked by <@${mentionId}>` : null, 'AniList'].filter(Boolean);
-  const footer = ui.text(`-# ${footerBits.join('  ·  ')}`);
 
   let accent = typeof o.color === 'number' ? o.color : ui.ANILIST_BLUE;
   if (a.color === 'theme') accent = paletteFor(look?.profile).accent;
   else if (a.color === 'anilist') accent = ui.ANILIST_BLUE;
 
-  const children = [];
+  const embed = new EmbedBuilder().setColor(accent);
+  if (activity.createdAt) embed.setTimestamp(new Date(activity.createdAt * 1000));
+
+  // Author line: avatar, name, streak, and their profile status (tagline).
+  const streakBit = show.has('streak') && streak > 0 ? ` 🔥 ${streak}` : '';
+  const tagline = show.has('status') && look?.profile?.tagline ? ` — “${ui.clip(String(look.profile.tagline).replace(/\s+/g, ' '), 70)}”` : '';
+  const author = { name: ui.clip(`✦ ${username}${streakBit}${tagline}`, 250), url: profileUrl };
+  if (ui.isHttpUrl(o.avatarUrl)) author.iconURL = o.avatarUrl;
+  embed.setAuthor(author);
+
+  const badges = ownerId ? social.badgesFor(ownerId).map((b) => b.label) : [];
+  const footerText = ['AniList', ...badges].join(' • ');
+  let components = [];
 
   if (activity.__typename === 'ListActivity' && activity.media) {
     const m = activity.media;
     const si = seasonInfo || { rootId: m.id, rootTitle: m.title?.english || m.title?.romaji, rootSiteUrl: m.siteUrl };
     const mature = Boolean(m.isAdult);
-    const blur = mature && cfg.mature !== 'show';
+    const hideCover = mature && cfg.mature === 'blur';
     const words = progressWords(activity);
-    const seasonBit = si.season && m.type !== 'MANGA' ? `Season ${si.season}` : null;
-    const caption = `**${statusVerb(activity.status)}${words ? ` ${words}` : ''}**${seasonBit ? `  ·  ${seasonBit}` : ''}  ${statusEmoji(activity.status)}`;
-    const heading = style === 'minimal' ? '###' : style === 'compact' ? '##' : '#';
-    const title = `${heading} [${ui.esc(ui.clip(si.rootTitle || 'Unknown title', 90))}](${si.rootSiteUrl || m.siteUrl})`;
+    const seasonBit = si.season && m.type !== 'MANGA' ? ` · Season ${si.season}` : '';
+    const caption = `${statusVerb(activity.status)}${words ? ` ${words}` : ''}${seasonBit} ${statusEmoji(activity.status)}`;
+    const heading = style === 'minimal' ? '##' : '#';
+    const parts = [`${caption}\n${heading} [${ui.esc(ui.clip(si.rootTitle || 'Unknown title', 90))}](${si.rootSiteUrl || m.siteUrl})`];
 
-    const cover = m.coverImage?.extraLarge || m.coverImage?.large || m.coverImage?.medium || null;
-    const showCover = show.has('cover') && ui.isHttpUrl(cover) && style !== 'minimal';
-
-    // Banner across the top (full style). AniList's banner when there is one,
-    // otherwise the bot paints one from the cover.
-    if (style === 'full' && show.has('cover')) {
-      const base = publicUrl();
-      const hex6 = (n) => (n >>> 0).toString(16).padStart(6, '0').slice(-6);
-      const banner = m.bannerImage || (base ? `${base}/banner/v1/anime/${m.id}/0b1622-${hex6(accent)}.jpg` : null);
-      const g = banner ? ui.gallery([{ url: banner, description: si.rootTitle, spoiler: blur }]) : null;
-      if (g) children.push(g);
-    }
-
-    const headLines = [author, caption, title];
-    if (showCover) {
-      children.push(new SectionBuilder().addTextDisplayComponents(...headLines.map((l) => ui.text(l))).setThumbnailAccessory(thumb(cover, blur)));
-    } else {
-      children.push(ui.text(headLines.join('\n')));
-    }
-
-    // Progress through this season.
+    // Progress through this season, as a bar.
     const prog = show.has('progress') && style !== 'minimal' ? seasonProgress(activity) : null;
     if (prog) {
-      const unitLabel = prog.unit.toUpperCase();
-      if (prog.total) {
-        const line = `-# ${unitLabel} ${prog.done} OF ${prog.total}  ·  ${prog.pct}%${prog.next ? `  ·  ep ${prog.next.episode} airs <t:${prog.next.airingAt}:R>` : ''}`;
-        children.push(ui.text(line));
-        const bar = barUrl(prog.done, prog.total, accent);
-        const g = bar ? ui.gallery([{ url: bar, description: `${prog.done} of ${prog.total}` }]) : null;
-        if (g) children.push(g);
-        else children.push(ui.text(`\`${ui.bar(prog.done, prog.total, 18)}\``));
-      } else if (prog.done) {
-        children.push(ui.text(`-# ${unitLabel} ${prog.done}  ·  still airing${prog.next ? `  ·  ep ${prog.next.episode} airs <t:${prog.next.airingAt}:R>` : ''}`));
-      }
+      const next = prog.next ? ` · ep ${prog.next.episode} <t:${prog.next.airingAt}:R>` : '';
+      if (prog.total) parts.push(`\`${ui.bar(prog.done, prog.total, 14)}\`  **${prog.done}** / ${prog.total} · ${Math.round(prog.pct)}%${next}`);
+      else if (prog.done) parts.push(`${prog.unit === 'chapter' ? 'Chapter' : 'Episode'} **${prog.done}** · still airing${next}`);
     }
 
     if (style !== 'minimal') {
       const info = [];
-      if (show.has('rating') && typeof m.averageScore === 'number') info.push(`⭐ ${(m.averageScore / 10).toFixed(1)}`);
+      if (show.has('rating') && typeof m.averageScore === 'number') info.push(`⭐ ${(m.averageScore / 10).toFixed(1)}/10`);
       if (o.ratingLine) info.push(o.ratingLine);
       const tags = show.has('genres') ? pickTags(m.tags, m.genres, 3) : [];
-      if (tags.length) info.push(`🏷️ ${tags.map((t) => ui.esc(t)).join(' · ')}`);
-      if (mature) info.push('🔞 Mature');
+      if (tags.length) info.push(`🏷️ ${tags.map((t) => ui.esc(t)).join(', ')}`);
+      if (mature) info.push(hideCover ? '🔞 Mature · cover hidden' : '🔞 Mature');
       if (show.has('popularity') && si.popularityRank) info.push(`❤️ #${si.popularityRank} Most Popular`);
-      if (info.length) children.push(ui.text(info.join('  ·  ')));
-      if (style === 'full' && show.has('description')) {
-        const syn = ui.clip(stripDescription(m.description), 170);
-        if (syn) children.push(ui.text(`-# ${ui.softEsc(syn)}`));
+      if (info.length) parts.push(info.join('  •  '));
+      if (show.has('description')) {
+        const syn = ui.clip(stripDescription(m.description), style === 'compact' ? 100 : 160);
+        if (syn) parts.push(ui.softEsc(syn));
       }
     }
+    embed.setDescription(ui.clip(parts.join('\n\n'), 4000));
 
-    children.push(ui.divider());
+    const cover = m.coverImage?.extraLarge || m.coverImage?.large || m.coverImage?.medium || null;
+    if (show.has('cover') && !hideCover && ui.isHttpUrl(cover)) {
+      if (style === 'full') embed.setImage(cover);
+      else embed.setThumbnail(cover);
+    }
+    embed.setFooter({ text: footerText });
+
     const row = postButtons(si.rootId, m.id, { likeCount: o.likeCount || 0, rateLabel: o.rateLabel });
     if (o.preview) row.components.forEach((b) => b.setDisabled(true));
-    children.push(row);
-    children.push(footer);
+    components = [row];
   } else if (activity.__typename === 'TextActivity' || activity.__typename === 'MessageActivity') {
-    const body = ui.clip(stripMarkup(activity.text || activity.message), 600) || '*(image or media post)*';
-    children.push(ui.text(`${author}\n### 💬 ${activity.__typename === 'TextActivity' ? 'Posted a status' : 'Posted a message'}`));
-    children.push(ui.text(ui.softEsc(body)));
-    if (activity.siteUrl) children.push(ui.actionRow(ui.linkButton(activity.siteUrl, 'Open on AniList', '↗️')));
-    children.push(footer);
+    embed
+      .setTitle(activity.__typename === 'TextActivity' ? '💬 Posted a status update' : '💬 Posted a message')
+      .setDescription(ui.clip(stripMarkup(activity.text || activity.message), 600) || '*(image or media post)*')
+      .setFooter({ text: footerText });
+    if (ui.isHttpUrl(activity.siteUrl)) embed.setURL(activity.siteUrl);
+    embed.setColor(ui.ANILIST_BLUE);
   } else {
-    children.push(ui.text(`${author}\n### 📺 New AniList activity`));
-    children.push(ui.actionRow(ui.linkButton(profileUrl, 'Open profile', '↗️')));
-    children.push(footer);
+    embed.setTitle('📺 New AniList activity').setURL(profileUrl).setFooter({ text: footerText }).setColor(ui.ANILIST_BLUE);
   }
 
-  const payload = ui.fit([ui.card(accent, children)]);
-  payload.allowedMentions = mentionId ? { users: [mentionId] } : { parse: [] };
-  if (mentionId) payload.flags = ui.V2 | MessageFlags.SuppressNotifications; // quiet ping: no sound/push
+  const payload = { embeds: [embed], components, allowedMentions: mentionId ? { users: [mentionId] } : { parse: [] }, accent };
+  if (mentionId) {
+    payload.content = `<@${mentionId}>`;
+    payload.flags = MessageFlags.SuppressNotifications; // quiet ping: no sound/push
+  }
+  return payload;
+}
+
+// A short "caught up" post when someone had a pile of updates waiting
+// (bot was down, AniList was slow…): one embed instead of a flood.
+function buildCatchUpPost({ username, avatarUrl, items, mentionId, color }) {
+  const profileUrl = `https://anilist.co/user/${encodeURIComponent(username)}`;
+  const author = { name: `✦ ${username}`, url: profileUrl };
+  if (ui.isHttpUrl(avatarUrl)) author.iconURL = avatarUrl;
+  const lines = items.slice(0, 12).map((it) => `${statusEmoji(it.status)} **${ui.esc(ui.clip(it.title, 60))}** — ${it.text}`);
+  if (items.length > 12) lines.push(`-# +${items.length - 12} more`);
+  const embed = new EmbedBuilder()
+    .setColor(typeof color === 'number' ? color : ui.ANILIST_BLUE)
+    .setAuthor(author)
+    .setTitle(`📦 Caught up on ${items.length} update${items.length === 1 ? '' : 's'}`)
+    .setDescription(ui.clip(lines.join('\n'), 4000))
+    .setFooter({ text: 'Bundled so the channel isn’t flooded • AniList' })
+    .setTimestamp(new Date());
+  const cover = items.find((it) => ui.isHttpUrl(it.cover))?.cover;
+  if (cover) embed.setThumbnail(cover);
+  const payload = { embeds: [embed], components: [], allowedMentions: mentionId ? { users: [mentionId] } : { parse: [] } };
+  if (mentionId) {
+    payload.content = `<@${mentionId}>`;
+    payload.flags = MessageFlags.SuppressNotifications;
+  }
   return payload;
 }
 
@@ -299,4 +302,4 @@ function findButtonId(componentsJson, prefix) {
   return found;
 }
 
-module.exports = { buildActivityPost, postButtons, withLikeCount, findButtonId, seasonProgress, statusVerb, statusEmoji, NEW_FIELDS };
+module.exports = { buildActivityPost, buildCatchUpPost, progressWords, postButtons, withLikeCount, findButtonId, seasonProgress, statusVerb, statusEmoji, NEW_FIELDS };

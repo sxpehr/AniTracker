@@ -10,6 +10,7 @@
     "check": "node --check index.js && node --check storage.js && node --check commands.js && node -e \"for (const f of require('fs').readdirSync('features')) require('child_process').execSync('node --check features/' + f, { stdio: 'inherit' })\""
   },
   "dependencies": {
+    "@napi-rs/canvas": "^1.2.0",
     "@upstash/redis": "^1.38.2",
     "discord.js": "^14.27.0",
     "dotenv": "^16.4.5",

@@ -9,20 +9,42 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_M
   return fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
 }
 
+// Rate-limit gate. AniList allows ~90 requests/min (sometimes lowered to 30)
+// and reports what's left in X-RateLimit-Remaining. When we're nearly out we
+// wait for the window to reset instead of firing requests that get a 429 —
+// before this, a big poll burned the budget early and the accounts polled
+// last kept failing every single poll.
+let gateUntil = 0;
+function noteRateLimit(res) {
+  const remaining = parseInt(res.headers.get('x-ratelimit-remaining'), 10);
+  const reset = parseInt(res.headers.get('x-ratelimit-reset'), 10); // unix seconds
+  if (Number.isFinite(remaining) && remaining <= 2) {
+    const until = Number.isFinite(reset) ? reset * 1000 + 250 : Date.now() + 20000;
+    gateUntil = Math.max(gateUntil, Math.min(until, Date.now() + 60000));
+  }
+}
+async function waitForGate() {
+  const wait = gateUntil - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+}
+
 async function anilistQuery(query, variables, { token, retryOn429 = true } = {}) {
   const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
 
+  await waitForGate();
   const res = await fetchWithTimeout(ANILIST_API, {
     method: 'POST',
     headers,
     body: JSON.stringify({ query, variables }),
   });
+  noteRateLimit(res);
 
   // Rate limited: AniList says how long to wait. Wait once (capped) and retry.
   if (res.status === 429 && retryOn429) {
     const retryAfter = Math.min(parseInt(res.headers.get('retry-after'), 10) || 30, 60);
-    await new Promise((r) => setTimeout(r, retryAfter * 1000));
+    gateUntil = Math.max(gateUntil, Date.now() + retryAfter * 1000);
+    await waitForGate();
     return anilistQuery(query, variables, { token, retryOn429: false });
   }
 
@@ -58,32 +80,34 @@ async function getUserByName(name) {
   return data.data.User || null;
 }
 
-async function getRecentActivities(userId, perPage = 10) {
-  const query = `
-    query ($userId: Int, $perPage: Int) {
-      Page(page: 1, perPage: $perPage) {
-        activities(userId: $userId, sort: ID_DESC) {
+// Everything an activity post needs about a show, in the poll request itself.
+const ACTIVITY_MEDIA = `
+  id
+  type
+  format
+  status
+  title { romaji english }
+  siteUrl
+  description(asHtml: false)
+  coverImage { extraLarge large medium color }
+  bannerImage
+  averageScore
+  genres
+  isAdult
+  episodes
+  chapters
+  duration
+  nextAiringEpisode { episode airingAt }
+`;
+
+const ACTIVITY_FRAGMENT = `
           __typename
           ... on ListActivity {
             id
             status
             progress
             createdAt
-            media {
-              id
-              type
-              format
-              title { romaji english }
-              siteUrl
-              description(asHtml: false)
-              coverImage { extraLarge large medium }
-              bannerImage
-              averageScore
-              genres
-              isAdult
-              episodes
-              duration
-            }
+            media { ${ACTIVITY_MEDIA} }
           }
           ... on TextActivity {
             id
@@ -96,12 +120,98 @@ async function getRecentActivities(userId, perPage = 10) {
             message
             createdAt
             siteUrl
-          }
-        }
+          }`;
+
+async function getRecentActivities(userId, perPage = 10) {
+  const query = `
+    query ($userId: Int, $perPage: Int) {
+      Page(page: 1, perPage: $perPage) {
+        activities(userId: $userId, sort: ID_DESC) { ${ACTIVITY_FRAGMENT} }
       }
     }`;
   const data = await anilistQuery(query, { userId, perPage });
   return data.data.Page?.activities || [];
+}
+
+// One request per account per poll: the latest activities AND the most
+// recently updated list entries. The list entries catch updates that never
+// show up as an activity (AniList's "disable list activity" settings, or a
+// long "activity merge time" that keeps folding new episodes into one old
+// activity). If AniList ever rejects the list part, we fall back to the
+// activities-only query and stop asking for it.
+let listQueryBroken = false;
+async function getRecentFeed(userId, perPage = 25) {
+  if (listQueryBroken) return { activities: await getRecentActivities(userId, perPage), entries: null };
+  const query = `
+    query ($userId: Int, $perPage: Int) {
+      acts: Page(page: 1, perPage: $perPage) {
+        activities(userId: $userId, sort: ID_DESC) { ${ACTIVITY_FRAGMENT} }
+      }
+      list: Page(page: 1, perPage: 12) {
+        mediaList(userId: $userId, sort: UPDATED_TIME_DESC) {
+          id
+          status
+          progress
+          updatedAt
+          media { ${ACTIVITY_MEDIA} }
+        }
+      }
+    }`;
+  try {
+    const data = await anilistQuery(query, { userId, perPage });
+    return { activities: data.data.acts?.activities || [], entries: data.data.list?.mediaList || [] };
+  } catch (e) {
+    if (/AniList API (error 400|returned errors)/.test(e.message) && /mediaList|argument|Unknown|complex|depth|validation/i.test(e.message)) {
+      console.warn('AniList rejected the list-entries part of the poll query — polling activities only from now on:', e.message);
+      listQueryBroken = true;
+      return { activities: await getRecentActivities(userId, perPage), entries: null };
+    }
+    throw e;
+  }
+}
+
+// Tags for many shows in ONE request (used to give posts and stats specific
+// labels like "Isekai" or "Satire" instead of broad genres). Cached forever-ish
+// in memory; tags barely change.
+const tagCache = new Map(); // mediaId -> [{ name, rank, category, ... }]
+async function getMediaTags(ids) {
+  const want = [...new Set(ids.map(Number).filter((n) => n > 0))];
+  const missing = want.filter((id) => !tagCache.has(id)).slice(0, 50);
+  if (missing.length) {
+    const data = await anilistQuery(
+      `query ($ids: [Int]) { Page(perPage: 50) { media(id_in: $ids) { id tags { name rank category isMediaSpoiler isGeneralSpoiler isAdult } } } }`,
+      { ids: missing }
+    );
+    for (const m of data.data.Page?.media || []) {
+      tagCache.set(m.id, m.tags || []);
+      if (tagCache.size > 3000) tagCache.delete(tagCache.keys().next().value);
+    }
+    for (const id of missing) if (!tagCache.has(id)) tagCache.set(id, []);
+  }
+  return new Map(want.map((id) => [id, tagCache.get(id) || []]));
+}
+
+// Several AniList users' list entries for one show, in one request
+// (/watched: who in this server has seen it, how far, what score).
+async function getEntriesForMedia(mediaId, userIds) {
+  const ids = [...new Set(userIds.map(Number).filter((n) => n > 0))].slice(0, 50);
+  if (!ids.length) return [];
+  const data = await anilistQuery(
+    `query ($m: Int, $ids: [Int]) {
+      Page(perPage: 50) {
+        mediaList(mediaId: $m, userId_in: $ids) {
+          userId
+          status
+          progress
+          repeat
+          updatedAt
+          score(format: POINT_10_DECIMAL)
+        }
+      }
+    }`,
+    { m: Number(mediaId), ids }
+  );
+  return data.data.Page?.mediaList || [];
 }
 
 async function getMediaById(id) {
@@ -199,7 +309,7 @@ async function getMediaDetails(id) {
         popularity
         favourites
         genres
-        tags { name rank isMediaSpoiler isGeneralSpoiler }
+        tags { name rank category isMediaSpoiler isGeneralSpoiler isAdult }
         studios(isMain: true) { nodes { name siteUrl } }
         nextAiringEpisode { episode airingAt }
         trailer { id site }
@@ -267,6 +377,9 @@ module.exports = {
   anilistQuery,
   getUserByName,
   getRecentActivities,
+  getRecentFeed,
+  getMediaTags,
+  getEntriesForMedia,
   getMediaById,
   getUserFavorites,
   getMediaRelations,

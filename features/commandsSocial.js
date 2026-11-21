@@ -37,6 +37,8 @@ async function autocomplete(interaction) {
     const sub = interaction.options.getSubcommand(false);
     if (focused.name === 'anime' && sub === 'remove' && ['watchlater', 'myfavorites', 'rotation'].includes(interaction.commandName)) {
       choices = await anime.listSuggestions(interaction, value);
+    } else if (focused.name === 'anime' && ['watched', 'ratings'].includes(interaction.commandName) && value.trim().length < 2) {
+      choices = await require('./watched').suggestions(interaction.guildId, value);
     } else if (focused.name === 'anime') {
       if (value.trim().length >= 2) {
         const results = await withTimeout(searchAnime(value, 10), 2500, []);
@@ -66,12 +68,20 @@ async function autocomplete(interaction) {
       const al = social.anilistFor(core, target);
       const tz = social.peekUser(s, target).prefs.timezone;
       const current = engine.monthKey(engine.dayKey(new Date(), tz));
-      const months = new Set([current, ...Object.keys(st.users[String(al?.id)]?.months || {})]);
-      choices = [...months]
+      // Always the last 6 months (no typing needed), plus older months with data.
+      const history = st.users[String(al?.id)]?.months || {};
+      const recent = engine.lastMonths(current, 6).reverse();
+      const older = Object.keys(history)
+        .filter((m) => !recent.includes(m))
         .sort()
-        .reverse()
+        .reverse();
+      choices = [...recent, ...older]
         .slice(0, 25)
-        .map((m) => ({ name: engine.monthName(m), value: m }))
+        .map((m, i) => {
+          const eps = history[m]?.e || 0;
+          const when = i === 0 ? 'This month' : i === 1 ? 'Last month' : null;
+          return { name: `${engine.monthName(m)}${when ? ` · ${when}` : ''}${eps ? ` · ${eps} eps` : ' · nothing logged'}`, value: m };
+        })
         .filter((c) => c.name.toLowerCase().includes(value.toLowerCase()));
     }
   } catch (e) {
@@ -201,7 +211,31 @@ async function handle(interaction) {
     let ym = interaction.options.getString('month');
     if (!/^\d{4}-\d{2}$/.test(ym || '')) ym = engine.monthKey(engine.dayKey(new Date(), tz));
     await interaction.deferReply(priv ? { flags: ui.EPHEMERAL } : {}).catch(() => {});
-    return ctx.respond(interaction, await statsUi.recapPayload(target.id, me, ym, { shareable: priv }));
+    const { personalRecap } = require('./recaps');
+    return ctx.respond(interaction, await personalRecap(target.id, me, ym, { shareable: priv }));
+  }
+
+  if (name === 'rate') {
+    await interaction.deferReply({ flags: ui.EPHEMERAL }).catch(() => {});
+    const media = await resolveAnime(interaction);
+    if (media) require('./ratings').rememberTitle(media.id, titleOf(media));
+    return require('./ratings').handleRate(interaction, media, interaction.options.getInteger('score'), (interaction.options.getString('note') || '').trim() || null);
+  }
+
+  if (name === 'ratings') {
+    await interaction.deferReply().catch(() => {});
+    const user = interaction.options.getUser('user');
+    let mediaId = null;
+    if (interaction.options.getString('anime')) mediaId = animeIdFrom(interaction) || (await resolveAnime(interaction))?.id || -1;
+    return require('./ratings').handleRatings(interaction, { user, mediaId });
+  }
+
+  if (name === 'watched') {
+    await interaction.deferReply().catch(() => {});
+    const user = interaction.options.getUser('user');
+    let mediaId = null;
+    if (interaction.options.getString('anime')) mediaId = animeIdFrom(interaction) || (await resolveAnime(interaction))?.id || -1;
+    return require('./watched').handleCommand(interaction, { mediaId, user, query: interaction.options.getString('search') });
   }
 
   if (name === 'leaderboard') {
@@ -211,6 +245,6 @@ async function handle(interaction) {
   }
 }
 
-const HANDLED = new Set(['anime', 'rotation', 'profile', 'settings', 'watchlater', 'myfavorites', 'collection', 'recommend', 'review', 'stats', 'recap', 'leaderboard']);
+const HANDLED = new Set(['anime', 'rotation', 'profile', 'settings', 'watchlater', 'myfavorites', 'collection', 'recommend', 'review', 'stats', 'recap', 'leaderboard', 'rate', 'ratings', 'watched']);
 
 module.exports = { handle, autocomplete, HANDLED };

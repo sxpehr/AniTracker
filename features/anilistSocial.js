@@ -1,4 +1,5 @@
 const { anilistQuery } = require('../anilist');
+const { pickTags } = require('./tags');
 
 // AniList + AnimeThemes lookups used by profiles, collections, reviews and
 // stats. Everything is cached briefly so browsing a profile doesn't hammer
@@ -102,6 +103,7 @@ async function getProfileSnapshot(anilistId) {
               episodesWatched
               statuses { status count }
               genres(limit: 6, sort: COUNT_DESC) { genre count minutesWatched }
+              tags(limit: 25, sort: COUNT_DESC) { tag { name category isAdult } count minutesWatched }
             }
           }
         }
@@ -139,6 +141,16 @@ async function getProfileSnapshot(anilistId) {
         dropped: statuses.DROPPED || 0,
         paused: statuses.PAUSED || 0,
         genres: (a.genres || []).map((g) => ({ genre: g.genre, count: g.count, minutes: g.minutesWatched })),
+        // Specific tags (Isekai, Satire…) — the bland "cast"/"technical" ones filtered out.
+        tags: pickTags(
+          (a.tags || []).map((t) => ({ name: t.tag?.name, category: t.tag?.category, isAdult: t.tag?.isAdult, rank: 100, count: t.count })),
+          [],
+          8,
+          { minRank: 0 }
+        ).map((name) => {
+          const t = (a.tags || []).find((x) => x.tag?.name === name);
+          return { genre: name, count: t?.count || 0, minutes: t?.minutesWatched || 0 };
+        }),
         topRated: top && top.score ? { score: top.score, media: top.media } : null,
       },
       current: (data.data.current?.mediaList || []).filter((e) => e.media),
@@ -179,17 +191,19 @@ async function getTrending(perPage = 10, sort = 'TRENDING_DESC') {
   });
 }
 
-// A random pick from the ~2,500 most popular anime (optionally one genre).
-async function getRandomAnime(genre = null, retry = false) {
-  const page = 1 + Math.floor(Math.random() * (retry ? 10 : genre ? 120 : 500));
+// A random pick from the ~2,500 most popular anime (optionally one genre
+// and/or one tag — "vibe" — like Isekai or Iyashikei).
+async function getRandomAnime(genre = null, retry = false, tag = null) {
+  const narrow = genre || tag;
+  const page = 1 + Math.floor(Math.random() * (retry ? 6 : tag ? 30 : genre ? 120 : 500));
   const data = await anilistQuery(
-    `query ($page: Int, $genre: String) {
-      Page(page: $page, perPage: 5) { media(type: ANIME, sort: POPULARITY_DESC, isAdult: false, genre: $genre) { id } }
+    `query ($page: Int, $genre: String, $tag: String) {
+      Page(page: $page, perPage: 5) { media(type: ANIME, sort: POPULARITY_DESC, isAdult: false, genre: $genre, tag: $tag) { id } }
     }`,
-    { page, genre }
+    { page, genre, tag }
   );
   const list = data.data.Page?.media || [];
-  if (!list.length && genre && !retry) return getRandomAnime(genre, true); // rarer genre: stay near the top
+  if (!list.length && narrow && !retry) return getRandomAnime(genre, true, tag); // rarer pick: stay near the top
   return list.length ? list[Math.floor(Math.random() * list.length)].id : null;
 }
 

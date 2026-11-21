@@ -1,19 +1,20 @@
 // What `/update` posts when no custom message is given. Edit this list
 // whenever you ship something worth telling servers about.
 const LATEST_UPDATE = {
-  title: '✨ AniTracker update — Profiles & Reviews',
+  title: '✨ AniTracker update — Recaps, a new look & admin settings',
   items: [
-    '**🪪 /profile** — your own anime page: banner, bio, featured anime, favorites shelf, what you’re watching, favorite opening, reviews and stats',
-    '**🎨 /settings** — themes (Midnight, Sakura, AMOLED, Cyberpunk…), custom colours, banners, and pick exactly what your profile shows',
-    '**✍️ Reviews** — write them right in Discord with `/review write` or the new ✍️ button, mark spoilers, browse the most helpful ones',
-    '**🗂️ Collections** — Favorites, Watch Later, In Rotation and your own lists like “Comfort Anime”',
-    '**📊 /stats & 🎁 /recap** — monthly + lifetime stats, watching streaks with a heatmap, and a shareable monthly recap',
-    '**🏆 /leaderboard** — friendly server boards (server managers choose which ones)',
-    '**🔎 /anime** — info, search, trending, random and what’s airing next, with one-tap Watch later / Favorite / Rotation',
-    '**📌 /watchlater · ⭐ /myfavorites · 🔄 /rotation** — view, add and remove straight from a command',
-    '**🔘 New post buttons** — 🤍 Like, ✍️ Review and 🗂️ Save to list, plus your own post style in /settings',
+    '**🆕 New activity posts** — Discord’s modern layout: the anime’s banner, your profile status, and a progress bar for the season you’re on (“episode 7 of 12 · 58%”)',
+    '**🏷️ Real vibes, not vague genres** — posts and stats now use AniList tags like *Isekai*, *Satire* or *Iyashikei* instead of “Comedy, Adventure”',
+    '**📅 Weekly & 🗓️ monthly server recaps** — every Monday and on the 1st: most hours, episodes, different anime, completions, streaks and the server favourite',
+    '**🎁 Your monthly recap by DM** — with “share to a server” and “compare with another month”',
+    '**🗓️ /recap** — the last 6 months show up as choices, no typing',
+    '**🛡️ /serversettings** — admins pick the channel, recaps, leaderboards, auto-tracking, 18+ handling and more, plus a health check for profiles that aren’t posting',
+    '**⭐ Ratings** — tap ⭐ Rate on any post or use `/rate`; `/ratings` shows the server’s top rated, anyone’s ratings page, or everyone’s score for one anime',
+    '**🔎 /watched** — who here watched an anime (status, progress, score), what someone watched, or search everything the server watched',
+    '**💜 /recommendanimes** — now shows who voted for what',
+    '**🔧 Fixed** — updates that AniList merges into an older activity (or that never make an activity) now post too',
   ],
-  footer: 'Try /profile — then make it yours with /settings',
+  footer: 'Admins: try /serversettings · everyone: /rate, /watched, /recap',
 };
 
 module.exports = { LATEST_UPDATE };

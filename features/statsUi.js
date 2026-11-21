@@ -106,8 +106,8 @@ async function monthBlocks({ st, su, al, tz }, ym, { compact = false } = {}) {
   const g = ui.coverGallery(top.slice(0, 4).map((a) => ({ url: a.c, description: a.t })));
   if (g) blocks.push(g);
   blocks.push(ui.text(top.map((a, i) => `\`${String(i + 1).padStart(2, '0')}\` **${a.u ? `[${ui.esc(ui.clip(a.t, 60))}](${a.u})` : ui.esc(a.t)}** · ${a.eps} ep${a.eps === 1 ? '' : 's'}`).join('\n')));
-  if (sum.topGenres.length) {
-    blocks.push(ui.text(`${ui.label('Top genres')}\n${genreBars(sum.topGenres.map((x) => ({ name: x.genre, value: x.eps })))}`));
+  if (sum.topTags.length) {
+    blocks.push(ui.text(`${ui.label('Your vibe this month')}\n${genreBars(sum.topTags.map((x) => ({ name: x.genre, value: x.eps })))}`));
   }
   const months = engine.lastMonths(ym, 6);
   const values = months.map((m) => su?.months?.[m]?.e || 0);
@@ -156,7 +156,8 @@ async function lifetimeBlocks({ al, su }) {
       ui.row([ui.label('Highest rated ever'), `**[${ui.esc(titleOf(L.topRated.media))}](${L.topRated.media.siteUrl})**`, `-# ${L.topRated.score}/10`], L.topRated.media.coverImage?.large)
     );
   }
-  if (L.genres.length) blocks.push(ui.text(`${ui.label('Most watched genres')}\n${genreBars(L.genres.map((g) => ({ name: g.genre, value: g.count })), 'anime', 5)}`));
+  const lifeTags = L.tags?.length ? L.tags : L.genres;
+  if (lifeTags.length) blocks.push(ui.text(`${ui.label(L.tags?.length ? 'What you watch most' : 'Most watched genres')}\n${genreBars(lifeTags.map((g) => ({ name: g.genre, value: g.count })), 'anime', 5)}`));
   const months = Object.entries(su?.months || {}).sort((a, b) => b[1].e - a[1].e);
   if (months.length) blocks.push(ui.text(`-# Most active month since tracking began: **${engine.monthName(months[0][0])}** · ${ui.num(months[0][1].e)} episodes`));
   return blocks;
@@ -220,6 +221,8 @@ async function statsPayload(ownerId, viewerId, tab = 'month', ym = null) {
 
 /* --------------------------------- /recap --------------------------------- */
 
+// The recap card itself. Month picker / compare / DM controls are added by
+// features/recaps.js (personalRecap).
 async function recapPayload(ownerId, viewerId, ym, { shareable = true } = {}) {
   const g = await gather(ownerId);
   const sum = engine.monthSummary(g.st, g.su, ym);
@@ -267,9 +270,9 @@ async function recapPayload(ownerId, viewerId, ym, { shareable = true } = {}) {
     const gal = ui.coverGallery(rest.map((a) => ({ url: a.c, description: a.t })), { single: 'row' });
     if (gal) children.push(gal);
   }
-  if (sum.topGenres.length) {
+  if (sum.topTags.length) {
     children.push(
-      ui.text(`${ui.label('Your genre')}\n## ${ui.esc(sum.topGenres[0].genre)}\n${genreBars(sum.topGenres.slice(0, 3).map((x) => ({ name: x.genre, value: x.eps })), 'eps', 3)}`)
+      ui.text(`${ui.label('Your vibe')}\n## ${ui.esc(sum.topTags[0].genre)}\n${genreBars(sum.topTags.slice(0, 3).map((x) => ({ name: x.genre, value: x.eps })), 'eps', 3)}`)
     );
   }
   if (scored.length) {
@@ -297,11 +300,22 @@ const BOARDS = {
   recommendations: { label: 'Recommendations', emoji: '💜', unit: 'recs' },
   reviews: { label: 'Reviews written', emoji: '✍️', unit: 'reviews' },
   helpful: { label: 'Most helpful reviewers', emoji: '❤️', unit: 'likes' },
+  ratings: { label: 'Most anime rated', emoji: '⭐', unit: 'rated' },
+  freaky: { label: 'Freakiest in the server', emoji: '😳', unit: 'ecchi eps', adminNote: 'Off by default · counts ecchi / fan-service episodes', optIn: true },
 };
 
+// Boards switched on in a server. Opt-in boards (freaky) stay off until an admin turns them on.
 function guildBoards(s, guildId) {
   const cfg = s.guildConfig[guildId]?.leaderboards;
-  return Object.keys(BOARDS).filter((k) => !cfg || cfg[k] !== false);
+  return Object.keys(BOARDS).filter((k) => (cfg && k in cfg ? cfg[k] !== false : !BOARDS[k].optIn));
+}
+
+// All-time "freaky" episodes: tagged ecchi/fan-service shows (older months
+// only know genres, so the Ecchi genre counts there).
+function freakyEpisodes(su) {
+  let n = 0;
+  for (const m of Object.values(su?.months || {})) n += m.f || (m.g?.Ecchi || 0) + (m.g?.Hentai || 0);
+  return n;
 }
 
 async function leaderboardPayload(guildId, board) {
@@ -310,11 +324,15 @@ async function leaderboardPayload(guildId, board) {
   const st = await ctx.loadStats();
   const enabled = guildBoards(s, guildId);
   if (!enabled.length) return ui.fit([ui.card(ui.ANILIST_BLUE, [ui.text('### 🏆 Leaderboards are switched off in this server.\n-# A server manager can turn them on in `/settings` → Server.')])]);
-  if (!enabled.includes(board)) board = enabled[0];
+  let offNote = null;
+  if (!enabled.includes(board)) {
+    if (BOARDS[board]) offNote = `-# ${BOARDS[board].emoji} ${BOARDS[board].label} is switched off in this server — admins can turn it on in \`/serversettings\` → Recaps & leaderboards.`;
+    board = enabled[0];
+  }
 
   let rows = [];
   const guildData = core.guilds[guildId] || { users: [] };
-  if (['episodes', 'streak', 'completed'].includes(board)) {
+  if (['episodes', 'streak', 'completed', 'freaky'].includes(board)) {
     const seen = new Set();
     for (const t of guildData.users || []) {
       if (seen.has(t.id)) continue;
@@ -328,6 +346,7 @@ async function leaderboardPayload(guildId, board) {
       if (board === 'episodes') value = su?.months?.[ym]?.e || 0;
       if (board === 'completed') value = su?.months?.[ym]?.c || 0;
       if (board === 'streak') value = engine.streakOf(su, tz).current;
+      if (board === 'freaky') value = freakyEpisodes(su);
       rows.push({ who: ownerId ? `<@${ownerId}>` : `**${ui.esc(t.username)}**`, value });
     }
   } else {
@@ -337,6 +356,7 @@ async function leaderboardPayload(guildId, board) {
       if (board === 'recommendations') value = (u.recommendations || []).length;
       if (board === 'reviews') value = Object.values(s.reviews).filter((r) => r.authorId === uid).length;
       if (board === 'helpful') value = Object.values(s.reviews).filter((r) => r.authorId === uid).reduce((a, r) => a + (r.likes?.length || 0), 0);
+      if (board === 'ratings') value = require('./ratings').ratingsOf(s, uid).size;
       rows.push({ who: `<@${uid}>`, value });
     }
   }
@@ -346,8 +366,13 @@ async function leaderboardPayload(guildId, board) {
   const max = rows[0]?.value || 0;
   const lines = rows.map((r, i) => `${medals[i] || `\`#${i + 1}\``} ${r.who}\n${ui.bar(r.value, max, 12)}  **${ui.num(r.value)}** ${meta.unit}`);
   const children = [
-    ui.text(`### 🏆 ${meta.emoji} ${meta.label}\n-# ${board === 'episodes' || board === 'completed' ? 'Resets every month · ' : ''}friendly competition — your own stats matter more`),
+    ui.text(
+      `### 🏆 ${meta.emoji} ${meta.label}\n-# ${
+        board === 'freaky' ? 'All-time ecchi & fan-service episodes · just for fun 😳' : `${board === 'episodes' || board === 'completed' ? 'Resets every month · ' : ''}friendly competition — your own stats matter more`
+      }`
+    ),
     ui.divider(),
+    offNote ? ui.text(offNote) : null,
     ui.text(lines.length ? lines.join('\n') : '*Nobody on the board yet — get watching!*'),
     ui.divider(),
     ui.select('lb:c', 'Switch leaderboard…', enabled.map((k) => ({ label: BOARDS[k].label, value: k, emoji: BOARDS[k].emoji, default: k === board }))),
@@ -395,7 +420,7 @@ async function onComponent(interaction) {
     const [, kind, owner, ym] = parts;
     if (kind === 'open') {
       await interaction.deferReply({ flags: ui.EPHEMERAL }).catch(() => {});
-      return interaction.editReply(await recapPayload(owner, me, ym)).catch(() => {});
+      return interaction.editReply(await require('./recaps').personalRecap(owner, me, ym, { shareable: true })).catch(() => {});
     }
     if (kind === 'share') {
       if (owner !== me) return interaction.reply({ content: 'Only the owner can share their recap.', flags: ui.EPHEMERAL }).catch(() => {});

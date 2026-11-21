@@ -241,9 +241,22 @@ const commands = [
         { name: '✅ Completed this month', value: 'completed' },
         { name: '💜 Recommendations', value: 'recommendations' },
         { name: '✍️ Reviews written', value: 'reviews' },
-        { name: '❤️ Most helpful reviewers', value: 'helpful' }
+        { name: '❤️ Most helpful reviewers', value: 'helpful' },
+        { name: '⭐ Most anime rated', value: 'ratings' },
+        { name: '😳 Freakiest in the server', value: 'freaky' }
       )
   ),
+  base('rate', 'Give an anime a score from 1 to 10 (no review needed)')
+    .addStringOption((o) => o.setName('anime').setDescription('Start typing a title…').setRequired(true).setAutocomplete(true))
+    .addIntegerOption((o) => o.setName('score').setDescription('Your score').setRequired(true).setMinValue(1).setMaxValue(10))
+    .addStringOption((o) => o.setName('note').setDescription('One-line take (no spoilers!)').setRequired(false).setMaxLength(120)),
+  base('ratings', 'Ratings — the server’s top rated, one person’s page, or one anime')
+    .addUserOption((o) => o.setName('user').setDescription('See this person’s ratings page').setRequired(false))
+    .addStringOption((o) => o.setName('anime').setDescription('See everyone’s rating of this anime').setRequired(false).setAutocomplete(true)),
+  base('watched', 'Find what people in this server watched')
+    .addStringOption((o) => o.setName('anime').setDescription('Who here watched this anime').setRequired(false).setAutocomplete(true))
+    .addUserOption((o) => o.setName('user').setDescription('What this person watched').setRequired(false))
+    .addStringOption((o) => o.setName('search').setDescription('Search titles (or tags) the server watched').setRequired(false).setMaxLength(60)),
   base('serversettings', 'Admin panel: channel, recaps, leaderboards, auto-tracking and more').setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   base('feedback', 'Rate AniTracker and send feedback to the developer'),
   base('help', 'All AniTracker commands and buttons'),

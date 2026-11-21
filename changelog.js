@@ -9,9 +9,12 @@ const LATEST_UPDATE = {
     '**🎁 Your monthly recap by DM** — with “share to a server” and “compare with another month”',
     '**🗓️ /recap** — the last 6 months show up as choices, no typing',
     '**🛡️ /serversettings** — admins pick the channel, recaps, leaderboards, auto-tracking, 18+ handling and more, plus a health check for profiles that aren’t posting',
+    '**⭐ Ratings** — tap ⭐ Rate on any post or use `/rate`; `/ratings` shows the server’s top rated, anyone’s ratings page, or everyone’s score for one anime',
+    '**🔎 /watched** — who here watched an anime (status, progress, score), what someone watched, or search everything the server watched',
+    '**💜 /recommendanimes** — now shows who voted for what',
     '**🔧 Fixed** — updates that AniList merges into an older activity (or that never make an activity) now post too',
   ],
-  footer: 'Admins: try /serversettings · everyone: /recap',
+  footer: 'Admins: try /serversettings · everyone: /rate, /watched, /recap',
 };
 
 module.exports = { LATEST_UPDATE };

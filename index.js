@@ -65,6 +65,8 @@ const { guildConfig, peekConfig } = require('./features/guildConfig');
 const recaps = require('./features/recaps');
 const nudge = require('./features/nudge');
 const serverSettings = require('./features/serverSettings');
+const ratings = require('./features/ratings');
+const watched = require('./features/watched');
 
 const POLL_INTERVAL_MS = (parseInt(process.env.POLL_MINUTES, 10) || 3) * 60 * 1000;
 const ANIME_ROLE_NAME = 'anime'; // server role (case-insensitive) pinged on relaunch
@@ -534,6 +536,7 @@ async function routeFeatureInteraction(interaction) {
     if (ns === 'rv') return reviewsFeature.onModal(interaction);
     if (ns === 'q') return picker.onModal(interaction);
     if (ns === 'sv') return serverSettings.onModal(interaction);
+    if (ns === 'rt') return ratings.onModal(interaction);
     return;
   }
   switch (ns) {
@@ -543,6 +546,10 @@ async function routeFeatureInteraction(interaction) {
       return serverSettings.onComponent(interaction);
     case 'rx':
       return recaps.onComponent(interaction);
+    case 'rt':
+      return ratings.onComponent(interaction);
+    case 'wt':
+      return watched.onComponent(interaction);
     case 'p':
       return profileFeature.onComponent(interaction);
     case 's':
@@ -882,9 +889,18 @@ const RECOMMEND_EMBED_COLOR = 0xff9800;
 function buildRecommendEntries(recsObj) {
   return Object.entries(recsObj || {})
     .filter(([, r]) => r.title && r.recommendedBy && r.recommendedBy.length > 0)
-    .map(([mediaId, r]) => ({ mediaId, title: r.title, siteUrl: r.siteUrl, count: r.recommendedBy.length }))
+    .map(([mediaId, r]) => ({ mediaId, title: r.title, siteUrl: r.siteUrl, count: r.recommendedBy.length, by: r.recommendedBy }))
     .sort((a, b) => b.count - a.count)
     .slice(0, 10);
+}
+
+// Who voted, as mentions (never pings). For the global board only people who
+// voted from THIS server are named — other servers' members stay anonymous.
+function votersLine(e, guildData, isGlobal) {
+  const local = isGlobal ? (e.by || []).filter((id) => guildData.recommendations?.[e.mediaId]?.recommendedBy?.includes(id)) : e.by || [];
+  if (!local.length) return isGlobal ? '-# nobody from this server yet' : '';
+  const shown = local.slice(0, 6).map((id) => `<@${id}>`).join(' ');
+  return `-# 💜 ${isGlobal ? 'from here: ' : ''}${shown}${local.length > 6 ? ` +${local.length - 6}` : ''}`;
 }
 
 function buildRecommendPayload(scope, guildData, data) {
@@ -903,21 +919,58 @@ function buildRecommendPayload(scope, guildData, data) {
     const max = entries[0].count;
     entries.slice(0, 3).forEach((e, i) => {
       const cover = data.watchStats?.[e.mediaId]?.cover || null;
-      children.push(ui.row([`${medals[i]} **[${ui.esc(ui.clip(e.title, 70))}](${e.siteUrl})**`, `\`${ui.bar(e.count, max, 12)}\`  **${e.count}** ${e.count === 1 ? 'vote' : 'votes'}`], cover));
+      children.push(ui.row([`${medals[i]} **[${ui.esc(ui.clip(e.title, 70))}](${e.siteUrl})**`, `\`${ui.bar(e.count, max, 12)}\`  **${e.count}** ${e.count === 1 ? 'vote' : 'votes'}`, votersLine(e, guildData, isGlobal) || null].filter(Boolean), cover));
     });
     if (entries.length > 3) {
       children.push(
         ui.text(
           entries
             .slice(3)
-            .map((e, i) => `\`#${i + 4}\` [${ui.esc(ui.clip(e.title, 60))}](${e.siteUrl}) · **${e.count}**`)
+            .map((e, i) => `\`#${i + 4}\` [${ui.esc(ui.clip(e.title, 60))}](${e.siteUrl}) · **${e.count}**${votersLine(e, guildData, isGlobal) ? `\n${votersLine(e, guildData, isGlobal)}` : ''}`)
             .join('\n')
         )
       );
     }
   }
   children.push(ui.divider());
+  if (entries.length) {
+    children.push(
+      ui.select(
+        `recwho_${scope}`,
+        '👥 See who voted for…',
+        entries.map((e) => ({ label: ui.clip(e.title, 100), value: String(e.mediaId), description: `${e.count} ${e.count === 1 ? 'vote' : 'votes'}`, emoji: '💜' }))
+      )
+    );
+  }
   children.push(buildRecommendScopeRow(scope));
+  return ui.fit([ui.card(RECOMMEND_EMBED_COLOR, children)]);
+}
+
+// Everyone (from this server) who recommended one anime, with their messages.
+async function buildVotersPayload(scope, guildData, data, mediaId) {
+  const local = guildData.recommendations?.[mediaId] || {};
+  const global = data.globalRecommendations?.[mediaId] || {};
+  const rec = scope === 'global' ? global : local;
+  const voters = local.recommendedBy || [];
+  const soc = await loadSocial();
+  const lines = voters.map((id) => {
+    const note = soc.users[id]?.recommendations?.find((x) => String(x.mediaId) === String(mediaId))?.message;
+    return `💜 <@${id}>${note ? `\n-# “${ui.softEsc(ui.clip(note, 120))}”` : ''}`;
+  });
+  const cover = data.watchStats?.[mediaId]?.cover || null;
+  const others = (global.recommendedBy || []).filter((id) => !voters.includes(id)).length;
+  const children = [
+    ui.row(
+      [
+        '-# 💜 WHO RECOMMENDED IT',
+        `## ${rec.siteUrl ? `[${ui.esc(ui.clip(rec.title || 'this anime', 80))}](${rec.siteUrl})` : ui.esc(rec.title || 'this anime')}`,
+        `-# **${voters.length}** from this server${others ? ` · ${others} more in other servers` : ''}`,
+      ],
+      cover
+    ),
+    ui.divider(),
+    ui.text(lines.length ? lines.join('\n').slice(0, 3500) : '*Nobody in this server has recommended it — only people in other servers.*'),
+  ];
   return ui.fit([ui.card(RECOMMEND_EMBED_COLOR, children)]);
 }
 
@@ -937,6 +990,13 @@ async function handleRecommendAnimes(interaction, guildData, data) {
 }
 
 async function handleSelectMenu(interaction) {
+  if (interaction.customId.startsWith('recwho_') && interaction.guildId) {
+    const data = await loadData();
+    const guildData = ensureGuildData(data, interaction.guildId);
+    const scope = interaction.customId.split('_')[1] === 'global' ? 'global' : 'guild';
+    await respond(interaction, { ...(await buildVotersPayload(scope, guildData, data, interaction.values[0])), flags: ui.V2 | EPHEMERAL });
+    return;
+  }
   if (interaction.customId !== 'recscope' || !interaction.guildId) return;
   const data = await loadData();
   const guildData = ensureGuildData(data, interaction.guildId);
@@ -1228,9 +1288,10 @@ async function handleHelp(interaction) {
       '📚 Lists & reviews',
       ['`/anime info · search · trending · random · airing` — look anything up', '`/watchlater` · `/myfavorites` · `/rotation` — view, add, remove', '`/collection` — custom lists like “Comfort Anime”', '`/recommend` — recommend an anime with a message', '`/review write · read · browse` — write and discover reviews', '`/favorites` — anyone’s AniList favourites'],
     ],
-    ['📊 Stats & community', ['`/stats` — month, lifetime, streaks · `/recap` — monthly recap', '`/leaderboard` — server boards · `/recommendanimes` — most recommended', '-# Weekly + monthly server recaps post automatically; your personal recap arrives by DM on the 1st']],
+    ['⭐ Ratings & search', ['`/rate` — score any anime 1-10 · `/ratings` — server top rated, someone’s page, or one anime', '`/watched` — who here watched an anime, what someone watched, or search the server’s history']],
+    ['📊 Stats & community', ['`/stats` — month, lifetime, streaks · `/recap` — monthly recap', '`/leaderboard` — server boards · `/recommendanimes` — most recommended (and who voted)', '-# Weekly + monthly server recaps post automatically; your personal recap arrives by DM on the 1st']],
     ['💬 Other', ['`/feedback` — rate AniTracker & tell the developer anything', '`/update` — post an update notice silently *(Manage Server)*']],
-    ['🔘 On activity posts', ['🤍 Like · ✍️ Review · 🗂️ Save to a list · 📊 More info — replies only you can see', 'React to a post and its owner gets a private DM']],
+    ['🔘 On activity posts', ['🤍 Like · ⭐ Rate · ✍️ Review · 🗂️ Save to a list · 📊 More info — replies only you can see', 'React to a post and its owner gets a private DM']],
   ];
   const children = [ui.row(['-# ✦ ANITRACKER', '## Commands & buttons', '-# Everything AniTracker can do'], client.user.displayAvatarURL({ size: 256, extension: 'png' }))];
   for (const [title, lines] of sections) {
@@ -1333,9 +1394,14 @@ async function handleButton(interaction) {
   if (!interaction.guildId) return;
   const [action, idStr] = customId.split('_');
   const mediaId = parseInt(idStr, 10);
-  if (!mediaId || !['wl', 'rec', 'fav', 'info', 'like', 'rvw', 'col'].includes(action)) return;
+  if (!mediaId || !['wl', 'rec', 'fav', 'info', 'like', 'rvw', 'col', 'rate'].includes(action)) return;
 
-  // The review form must be the very first response (no defer before a modal).
+  // Forms must be the very first response (no defer before a modal).
+  if (action === 'rate') {
+    const data = await loadData();
+    const post = data.guilds[interaction.guildId]?.recentPosts?.[interaction.message?.id];
+    return ratings.openRateForm(interaction, mediaId, post?.mediaTitle || post?.animeTitle);
+  }
   if (action === 'rvw') {
     const data = await loadData();
     const post = data.guilds[interaction.guildId]?.recentPosts?.[interaction.message?.id];
@@ -1625,7 +1691,7 @@ function postRow(rootId, infoMediaId, likeCount = 0) {
   return activityPost.postButtons(rootId, infoMediaId, { likeCount, rateLabel: POST_RATE_BUTTON });
 }
 // The ⭐ Rate button on posts (part of the ratings feature).
-const POST_RATE_BUTTON = false;
+const POST_RATE_BUTTON = true;
 
 // Footer for classic (pre-layout-change) embed posts when their buttons refresh.
 function buildFooterText(recommendCount) {
@@ -1699,13 +1765,13 @@ async function coverColor(media) {
   return getDominantColor(cover.medium || cover.large || cover.extraLarge);
 }
 
-async function buildPostPayload({ username, activity, seasonInfo, look, ownerId, mentionId, streak, cfg, likeCount = 0, preview = false }) {
+async function buildPostPayload({ username, activity, seasonInfo, look, ownerId, mentionId, streak, cfg, guildId = null, likeCount = 0, preview = false }) {
   const color = activity.media ? await coverColor(activity.media).catch(() => DEFAULT_COLOR) : DEFAULT_COLOR;
-  const extra = postExtras ? await postExtras({ activity, seasonInfo, cfg }).catch(() => ({})) : {};
+  const extra = postExtras ? await postExtras({ activity, seasonInfo, cfg, guildId }).catch(() => ({})) : {};
   return activityPost.buildActivityPost({ username, activity, streak, seasonInfo, look, ownerId, mentionId, color, cfg, likeCount, preview, rateLabel: POST_RATE_BUTTON, ...extra });
 }
-// Hook for extra post details (community rating). Set by the ratings feature.
-let postExtras = null;
+// Extra post details: the server's community rating ("👥 8.3 here (4)").
+const postExtras = (args) => ratings.postExtras(args);
 
 /* ---------------------------------------------------------------------------
  * Poller
@@ -1878,7 +1944,7 @@ async function pollOnce() {
           }
 
           const mentionId = cfg.ping === 'off' ? null : user.addedBy || null;
-          const payload = await buildPostPayload({ username: user.username, activity, seasonInfo, look, ownerId, mentionId, streak, cfg });
+          const payload = await buildPostPayload({ username: user.username, activity, seasonInfo, look, ownerId, mentionId, streak, cfg, guildId });
           const sentMessage = await channel.send(payload);
 
           guildData.recentPosts[sentMessage.id] = {

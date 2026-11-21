@@ -541,4 +541,4 @@ async function onComponent(interaction) {
   }
 }
 
-module.exports = { runScheduled, serverRecapPayload, postServerRecap, personalRecap, comparePayload, recapControls, attachRows, onComponent, periodTitle, sendPersonalRecaps };
+module.exports = { _participants: participants, runScheduled, serverRecapPayload, postServerRecap, personalRecap, comparePayload, recapControls, attachRows, onComponent, periodTitle, sendPersonalRecaps };

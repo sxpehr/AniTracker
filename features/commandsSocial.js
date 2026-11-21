@@ -37,6 +37,8 @@ async function autocomplete(interaction) {
     const sub = interaction.options.getSubcommand(false);
     if (focused.name === 'anime' && sub === 'remove' && ['watchlater', 'myfavorites', 'rotation'].includes(interaction.commandName)) {
       choices = await anime.listSuggestions(interaction, value);
+    } else if (focused.name === 'anime' && ['watched', 'ratings'].includes(interaction.commandName) && value.trim().length < 2) {
+      choices = await require('./watched').suggestions(interaction.guildId, value);
     } else if (focused.name === 'anime') {
       if (value.trim().length >= 2) {
         const results = await withTimeout(searchAnime(value, 10), 2500, []);
@@ -213,6 +215,29 @@ async function handle(interaction) {
     return ctx.respond(interaction, await personalRecap(target.id, me, ym, { shareable: priv }));
   }
 
+  if (name === 'rate') {
+    await interaction.deferReply({ flags: ui.EPHEMERAL }).catch(() => {});
+    const media = await resolveAnime(interaction);
+    if (media) require('./ratings').rememberTitle(media.id, titleOf(media));
+    return require('./ratings').handleRate(interaction, media, interaction.options.getInteger('score'), (interaction.options.getString('note') || '').trim() || null);
+  }
+
+  if (name === 'ratings') {
+    await interaction.deferReply().catch(() => {});
+    const user = interaction.options.getUser('user');
+    let mediaId = null;
+    if (interaction.options.getString('anime')) mediaId = animeIdFrom(interaction) || (await resolveAnime(interaction))?.id || -1;
+    return require('./ratings').handleRatings(interaction, { user, mediaId });
+  }
+
+  if (name === 'watched') {
+    await interaction.deferReply().catch(() => {});
+    const user = interaction.options.getUser('user');
+    let mediaId = null;
+    if (interaction.options.getString('anime')) mediaId = animeIdFrom(interaction) || (await resolveAnime(interaction))?.id || -1;
+    return require('./watched').handleCommand(interaction, { mediaId, user, query: interaction.options.getString('search') });
+  }
+
   if (name === 'leaderboard') {
     const board = interaction.options.getString('category') || 'episodes';
     await interaction.deferReply().catch(() => {});
@@ -220,6 +245,6 @@ async function handle(interaction) {
   }
 }
 
-const HANDLED = new Set(['anime', 'rotation', 'profile', 'settings', 'watchlater', 'myfavorites', 'collection', 'recommend', 'review', 'stats', 'recap', 'leaderboard']);
+const HANDLED = new Set(['anime', 'rotation', 'profile', 'settings', 'watchlater', 'myfavorites', 'collection', 'recommend', 'review', 'stats', 'recap', 'leaderboard', 'rate', 'ratings', 'watched']);
 
 module.exports = { handle, autocomplete, HANDLED };

@@ -43,6 +43,20 @@ After a command or post button there's a **5% chance** of a private card: **Revi
 ## Everything else now uses the modern layout
 `/help`, `/list`, `/whostracking`, `/signin`, `/tracking`, `/favorites`, `/recommendanimes`, `/update`, More info (banner, cover, facts, tags, cast gallery), feedback thanks, the welcome message, and every DM (reactions, likes, recommendations, sign-in).
 
+## From user feedback (after the `restore/before-user-feedback` point)
+- **See who voted:** `/recommendanimes` names the voters under each title (mentions never ping). The global board only names people from *this* server, the rest are a count. A **See who voted for…** menu opens a card with every voter here and the message they left with `/recommend`.
+- **Search what people watched — `/watched`:**
+  - `/watched anime:<title>` — who in this server has it on AniList, grouped by Watching / Completed / Paused / Dropped / Planning, with episode progress and their AniList score (one live AniList request).
+  - `/watched user:@someone` — everything they watched since tracking began, newest first.
+  - `/watched` or `/watched search:<words>` — everything the server watched, most watchers first, filtered by title or tag. Before you type, the anime box suggests what the server actually watched.
+- **Ratings:** a ⭐ **Rate** button on every post and `/rate anime score [note]` give a quick 1–10 score with an optional one-line take, no review needed. A written review's score counts too.
+  - `/ratings` — the server's top-rated anime (average of members' scores), plus who rates the most. Menus open any anime or person.
+  - `/ratings user:@someone` — their ratings page: sorted highest / lowest / newest, paged, with covers and a score spread.
+  - `/ratings anime:<title>` — everyone here's score and take, the spread, and the AniList average.
+  - Posts show the server's score when there is one ("👥 8.3 here (4)").
+  - New leaderboard: **⭐ Most anime rated**.
+- **😳 Freakiest in the server:** a leaderboard of all-time ecchi / fan-service episodes (Ecchi genre or strong fan-service tags). It's **off by default** because the bot is public. Turn it on in `/serversettings` → Recaps & leaderboards. If someone asks for it while it's off, they get a note saying so.
+
 ## Limits worth knowing
 - Discord's modern layout has no small inline avatar like the old embed author line, so the post shows the name (linked to AniList) without the round avatar.
 - The progress bar is an image served by the bot (`/bar/...`, already used by profiles). If `PUBLIC_URL`/`RENDER_EXTERNAL_URL` is missing it falls back to a text bar.
@@ -53,6 +67,7 @@ After a command or post button there's a **5% chance** of a private card: **Revi
 - 🔲 `/serversettings` → Recaps → Preview weekly
 - 🔲 Your friend's profile in the Health check
 - 🔲 The first Monday recap and the Dec 1 DMs
+- 🔲 ⭐ Rate on a post, then `/ratings` and `/watched anime:` in your server
 
 ---
 

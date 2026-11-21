@@ -300,11 +300,22 @@ const BOARDS = {
   recommendations: { label: 'Recommendations', emoji: '💜', unit: 'recs' },
   reviews: { label: 'Reviews written', emoji: '✍️', unit: 'reviews' },
   helpful: { label: 'Most helpful reviewers', emoji: '❤️', unit: 'likes' },
+  ratings: { label: 'Most anime rated', emoji: '⭐', unit: 'rated' },
+  freaky: { label: 'Freakiest in the server', emoji: '😳', unit: 'ecchi eps', adminNote: 'Off by default · counts ecchi / fan-service episodes', optIn: true },
 };
 
+// Boards switched on in a server. Opt-in boards (freaky) stay off until an admin turns them on.
 function guildBoards(s, guildId) {
   const cfg = s.guildConfig[guildId]?.leaderboards;
-  return Object.keys(BOARDS).filter((k) => !cfg || cfg[k] !== false);
+  return Object.keys(BOARDS).filter((k) => (cfg && k in cfg ? cfg[k] !== false : !BOARDS[k].optIn));
+}
+
+// All-time "freaky" episodes: tagged ecchi/fan-service shows (older months
+// only know genres, so the Ecchi genre counts there).
+function freakyEpisodes(su) {
+  let n = 0;
+  for (const m of Object.values(su?.months || {})) n += m.f || (m.g?.Ecchi || 0) + (m.g?.Hentai || 0);
+  return n;
 }
 
 async function leaderboardPayload(guildId, board) {
@@ -313,11 +324,15 @@ async function leaderboardPayload(guildId, board) {
   const st = await ctx.loadStats();
   const enabled = guildBoards(s, guildId);
   if (!enabled.length) return ui.fit([ui.card(ui.ANILIST_BLUE, [ui.text('### 🏆 Leaderboards are switched off in this server.\n-# A server manager can turn them on in `/settings` → Server.')])]);
-  if (!enabled.includes(board)) board = enabled[0];
+  let offNote = null;
+  if (!enabled.includes(board)) {
+    if (BOARDS[board]) offNote = `-# ${BOARDS[board].emoji} ${BOARDS[board].label} is switched off in this server — admins can turn it on in \`/serversettings\` → Recaps & leaderboards.`;
+    board = enabled[0];
+  }
 
   let rows = [];
   const guildData = core.guilds[guildId] || { users: [] };
-  if (['episodes', 'streak', 'completed'].includes(board)) {
+  if (['episodes', 'streak', 'completed', 'freaky'].includes(board)) {
     const seen = new Set();
     for (const t of guildData.users || []) {
       if (seen.has(t.id)) continue;
@@ -331,6 +346,7 @@ async function leaderboardPayload(guildId, board) {
       if (board === 'episodes') value = su?.months?.[ym]?.e || 0;
       if (board === 'completed') value = su?.months?.[ym]?.c || 0;
       if (board === 'streak') value = engine.streakOf(su, tz).current;
+      if (board === 'freaky') value = freakyEpisodes(su);
       rows.push({ who: ownerId ? `<@${ownerId}>` : `**${ui.esc(t.username)}**`, value });
     }
   } else {
@@ -340,6 +356,7 @@ async function leaderboardPayload(guildId, board) {
       if (board === 'recommendations') value = (u.recommendations || []).length;
       if (board === 'reviews') value = Object.values(s.reviews).filter((r) => r.authorId === uid).length;
       if (board === 'helpful') value = Object.values(s.reviews).filter((r) => r.authorId === uid).reduce((a, r) => a + (r.likes?.length || 0), 0);
+      if (board === 'ratings') value = require('./ratings').ratingsOf(s, uid).size;
       rows.push({ who: `<@${uid}>`, value });
     }
   }
@@ -349,8 +366,13 @@ async function leaderboardPayload(guildId, board) {
   const max = rows[0]?.value || 0;
   const lines = rows.map((r, i) => `${medals[i] || `\`#${i + 1}\``} ${r.who}\n${ui.bar(r.value, max, 12)}  **${ui.num(r.value)}** ${meta.unit}`);
   const children = [
-    ui.text(`### 🏆 ${meta.emoji} ${meta.label}\n-# ${board === 'episodes' || board === 'completed' ? 'Resets every month · ' : ''}friendly competition — your own stats matter more`),
+    ui.text(
+      `### 🏆 ${meta.emoji} ${meta.label}\n-# ${
+        board === 'freaky' ? 'All-time ecchi & fan-service episodes · just for fun 😳' : `${board === 'episodes' || board === 'completed' ? 'Resets every month · ' : ''}friendly competition — your own stats matter more`
+      }`
+    ),
     ui.divider(),
+    offNote ? ui.text(offNote) : null,
     ui.text(lines.length ? lines.join('\n') : '*Nobody on the board yet — get watching!*'),
     ui.divider(),
     ui.select('lb:c', 'Switch leaderboard…', enabled.map((k) => ({ label: BOARDS[k].label, value: k, emoji: BOARDS[k].emoji, default: k === board }))),

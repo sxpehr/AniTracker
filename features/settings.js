@@ -632,7 +632,7 @@ async function onComponent(interaction) {
       await interaction.deferReply({ flags: ui.EPHEMERAL }).catch(() => {});
       const u = await draftUser(me, d);
       const post = ctx.buildActivityPreview ? await ctx.buildActivityPreview(me, u) : null;
-      if (post) post.components = [ui.text(`-# 📡 This is how your next activity post will look${d.dirty ? ' (unsaved changes included)' : ''}`), ...post.components];
+      if (post) post.content = `-# 📡 This is how your next activity post will look${d.dirty ? ' (unsaved changes included)' : ''}`;
       return interaction.editReply(post || { content: 'Preview unavailable right now.' }).catch((e) => console.error('Post preview failed:', e.message));
     }
     default:

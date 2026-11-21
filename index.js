@@ -61,6 +61,7 @@ const animeFeature = require('./features/anime');
 const { snapshot: mediaSnapshot } = require('./features/anilistSocial');
 const feed = require('./features/feed');
 const activityPost = require('./features/activityPost');
+const flood = require('./features/flood');
 const { guildConfig, peekConfig } = require('./features/guildConfig');
 const recaps = require('./features/recaps');
 const nudge = require('./features/nudge');
@@ -168,6 +169,7 @@ setupFeatures({
   missingChannelPerms: (channel) => missingChannelPerms(channel),
   trackInGuild: (...args) => trackInGuild(...args),
   getInviteUrl: () => getInviteUrl(),
+  resolveSeasonInfo: (...args) => resolveSeasonInfo(...args),
 });
 
 client.on(Events.Error, (err) => console.error('[discord client error]', err.message));
@@ -215,10 +217,14 @@ app.use(
     storageBackend,
     isStorageHealthy,
     loadSocial,
+    loadStats,
+    saveStats,
+    announce: require('./features/announce'),
   })
 );
 app.use(buildOAuthRouter({ loadData, saveData, onLinked: (id, account, guildId) => sendLinkedConfirmation(id, account, guildId) }));
 app.use(buildBannerRouter()); // generated profile banners (fetched + cached by Discord)
+app.use(require('./features/artRoutes').buildArtRouter()); // rotation cards, leaderboards, banner lists
 
 // Last-resort Express error handler — a thrown route must never crash the process.
 // eslint-disable-next-line no-unused-vars
@@ -1506,8 +1512,8 @@ async function applyRecommendVote(guildId, userId, media, add) {
 }
 
 // Updates the counts on a post after a Like (or an old Recommend) click.
-// Modern posts only get their Like label rewritten; classic embed posts
-// (from before the layout change) switch to the new, slimmer button row.
+// Posts from the short-lived modern layout only get their Like label
+// rewritten; classic embed posts get the current button row.
 async function refreshPostButtons(interaction, guildData, rootId) {
   try {
     const msg = interaction.message;
@@ -1517,12 +1523,9 @@ async function refreshPostButtons(interaction, guildData, rootId) {
       await msg.edit({ components: activityPost.withLikeCount(json, likeCount) });
       return;
     }
+    // Classic embed posts: swap in the current button row with the new count.
     const infoId = activityPost.findButtonId(json, 'info') || rootId;
-    const editPayload = { components: [postRow(rootId, infoId, likeCount)] };
-    const recCount = guildData.recommendations[rootId]?.recommendedBy?.length || 0;
-    const existingEmbed = msg.embeds[0];
-    if (existingEmbed) editPayload.embeds = [EmbedBuilder.from(existingEmbed).setFooter({ text: buildFooterText(recCount) })];
-    await msg.edit(editPayload);
+    await msg.edit({ components: [postRow(rootId, infoId, likeCount)] });
   } catch (e) {
     console.error('Failed to refresh post buttons:', e.message);
   }
@@ -1693,12 +1696,6 @@ function postRow(rootId, infoMediaId, likeCount = 0) {
 // The ⭐ Rate button on posts (part of the ratings feature).
 const POST_RATE_BUTTON = true;
 
-// Footer for classic (pre-layout-change) embed posts when their buttons refresh.
-function buildFooterText(recommendCount) {
-  if (recommendCount > 0) return `Recommended by ${recommendCount} ${recommendCount === 1 ? 'person' : 'people'} • AniList`;
-  return 'AniList';
-}
-
 function getPopularityRank(rankings) {
   if (!rankings) return null;
   const entry = rankings.find((r) => r.type === 'POPULAR' && r.allTime);
@@ -1765,10 +1762,10 @@ async function coverColor(media) {
   return getDominantColor(cover.medium || cover.large || cover.extraLarge);
 }
 
-async function buildPostPayload({ username, activity, seasonInfo, look, ownerId, mentionId, streak, cfg, guildId = null, likeCount = 0, preview = false }) {
+async function buildPostPayload({ username, avatarUrl = null, activity, seasonInfo, look, ownerId, mentionId, streak, cfg, guildId = null, likeCount = 0, preview = false }) {
   const color = activity.media ? await coverColor(activity.media).catch(() => DEFAULT_COLOR) : DEFAULT_COLOR;
   const extra = postExtras ? await postExtras({ activity, seasonInfo, cfg, guildId }).catch(() => ({})) : {};
-  return activityPost.buildActivityPost({ username, activity, streak, seasonInfo, look, ownerId, mentionId, color, cfg, likeCount, preview, rateLabel: POST_RATE_BUTTON, ...extra });
+  return activityPost.buildActivityPost({ username, avatarUrl, activity, streak, seasonInfo, look, ownerId, mentionId, color, cfg, likeCount, preview, rateLabel: POST_RATE_BUTTON, ...extra });
 }
 // Extra post details: the server's community rating ("👥 8.3 here (4)").
 const postExtras = (args) => ratings.postExtras(args);
@@ -1893,6 +1890,8 @@ async function pollOnce() {
       continue;
     }
     warnedChannels.delete(channel.id);
+    if (!guildData.postKeys) guildData.postKeys = {}; // flood protection: what was posted here lately
+    let sentThisCheck = 0;
 
     for (const user of [...guildData.users]) {
       const f = feeds.get(user.id);
@@ -1920,6 +1919,8 @@ async function pollOnce() {
         const look = ownerId && soc.users[ownerId] ? social.getUser(soc, ownerId) : null;
         const streak = statsEngine.streakOf(st.users[String(user.id)], tzFor(user.id)).current;
 
+        // Server settings first (status posts, manga, 18+), then flood protection.
+        const postable = [];
         for (const activity of events) {
           const isText = activity.__typename === 'TextActivity' || activity.__typename === 'MessageActivity';
           const skip =
@@ -1929,8 +1930,35 @@ async function pollOnce() {
           if (skip) {
             if (activity.id > (user.lastActivityId || 0)) user.lastActivityId = activity.id;
             changed = true;
-            continue;
-          }
+          } else postable.push(activity);
+        }
+        if (!postable.length) {
+          advance();
+          continue;
+        }
+        const plan = flood.plan(postable, { anilistId: user.id, burst: cfg.burst, recent: guildData.postKeys, capLeft: flood.GUILD_CAP - sentThisCheck });
+        if (plan.duplicates.length) console.log(`[flood] ${user.username} in ${guildId}: skipped ${plan.duplicates.length} repeat(s)`);
+        const mentionId = cfg.ping === 'off' ? null : user.addedBy || null;
+
+        // The pile that built up → one "caught up" post.
+        if (plan.bundled.length) {
+          const items = plan.bundled.map((ev) => ({
+            title: ev.media ? titleOf(ev.media) : 'Status post',
+            status: ev.status || 'posted',
+            text: ev.media ? `${activityPost.statusVerb(ev.status)}${activityPost.progressWords(ev) ? ` ${activityPost.progressWords(ev)}` : ''}${ev.createdAt ? ` · <t:${Math.floor(ev.createdAt)}:R>` : ''}` : 'posted on AniList',
+            cover: ev.media?.coverImage?.large || ev.media?.coverImage?.medium || null,
+          }));
+          const lastMedia = [...plan.bundled].reverse().find((e) => e.media)?.media;
+          const color = lastMedia ? await coverColor(lastMedia).catch(() => DEFAULT_COLOR) : DEFAULT_COLOR;
+          await channel.send(activityPost.buildCatchUpPost({ username: user.username, avatarUrl: user.avatar, items, mentionId, color }));
+          console.log(`[flood] ${user.username} in ${guildId}: bundled ${plan.bundled.length} update(s) into one post`);
+          sentThisCheck++;
+          flood.remember(guildData.postKeys, user.id, plan.bundled);
+          for (const ev of plan.bundled) if (ev.id > (user.lastActivityId || 0) && !ev.synthetic) user.lastActivityId = ev.id;
+          changed = true;
+        }
+
+        for (const activity of plan.individual) {
           let seasonInfo = null;
           if (activity.__typename === 'ListActivity' && activity.media) {
             seasonInfo = await resolveSeasonInfo(activity.media.id, titleOf(activity.media), activity.media.siteUrl, activity.media.type);
@@ -1943,9 +1971,10 @@ async function pollOnce() {
             data.watchStats[key] = entry;
           }
 
-          const mentionId = cfg.ping === 'off' ? null : user.addedBy || null;
-          const payload = await buildPostPayload({ username: user.username, activity, seasonInfo, look, ownerId, mentionId, streak, cfg, guildId });
+          const { accent, ...payload } = await buildPostPayload({ username: user.username, avatarUrl: user.avatar, activity, seasonInfo, look, ownerId, mentionId, streak, cfg, guildId });
           const sentMessage = await channel.send(payload);
+          sentThisCheck++;
+          flood.remember(guildData.postKeys, user.id, [activity]);
 
           guildData.recentPosts[sentMessage.id] = {
             addedBy: user.addedBy || null,
@@ -1956,12 +1985,12 @@ async function pollOnce() {
             rootId: seasonInfo ? seasonInfo.rootId : null,
             mediaId: activity.media?.id || null,
             cover: activity.media?.coverImage?.large || activity.media?.coverImage?.medium || null,
-            color: payload.components?.[0]?.data?.accent_color ?? null,
+            color: typeof accent === 'number' ? accent : null,
             postedAt: new Date().toISOString(),
             likes: [],
           };
           // Advance per activity, so a failure halfway never re-posts the earlier ones.
-          if (activity.id > (user.lastActivityId || 0)) user.lastActivityId = activity.id;
+          if (activity.id > (user.lastActivityId || 0) && !activity.synthetic) user.lastActivityId = activity.id;
           changed = true;
         }
         advance();
@@ -2012,7 +2041,9 @@ async function buildActivityPreview(userId, draftUser) {
   const seasonInfo = await resolveSeasonInfo(activity.media.id, titleOf(activity.media), activity.media.siteUrl, activity.media.type);
   const tz = draftUser?.prefs?.timezone || social.DEFAULT_TZ;
   const streak = al ? statsEngine.streakOf(st.users[String(al.id)], tz).current : 3;
-  return buildPostPayload({ username: al?.name || 'you', activity, seasonInfo, look: draftUser, ownerId: userId, mentionId: null, streak, cfg: {}, preview: true });
+  const avatarUrl = al ? data.linkedAccounts[userId]?.avatar || null : null;
+  const { accent, ...payload } = await buildPostPayload({ username: al?.name || 'you', avatarUrl, activity, seasonInfo, look: draftUser, ownerId: userId, mentionId: null, streak, cfg: {}, preview: true });
+  return payload;
 }
 
 /* ---------------------------------------------------------------------------

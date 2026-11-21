@@ -72,6 +72,14 @@
         <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></span>
         <span class="nav-label">Send Message</span>
       </button>
+      <button class="nav-item" data-view="editstats">
+        <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></span>
+        <span class="nav-label">Edit Stats</span>
+      </button>
+      <button class="nav-item" data-view="announce">
+        <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg></span>
+        <span class="nav-label">Announcement</span>
+      </button>
       <button class="nav-item" data-view="controls">
         <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></span>
         <span class="nav-label">Bot Controls</span>
@@ -177,6 +185,71 @@
         <textarea id="send-message" rows="5" placeholder="Type what AniTracker should post…"></textarea>
         <button id="send-btn" class="btn btn-primary">Send as AniTracker</button>
         <p id="send-result" class="muted-note" role="status" aria-live="polite"></p>
+      </div>
+    </section>
+
+    <!-- EDIT STATS -->
+    <section data-view-panel="editstats" class="view-panel" hidden>
+      <div class="tabs">
+        <button class="tab active" data-stats-tab="watched">All-time watches</button>
+        <button class="tab" data-stats-tab="people">Person's anime stats</button>
+      </div>
+
+      <div class="card" id="es-watched">
+        <p class="muted-note">The per-show counter behind “Most watched” (one per activity post). Change a number and press Save, or set it to 0 to remove the show.</p>
+        <div class="es-toolbar">
+          <input id="es-watched-search" type="search" placeholder="Search a title or AniList id…" />
+          <input id="es-add-id" type="number" min="1" placeholder="AniList id" />
+          <input id="es-add-count" type="number" min="0" placeholder="Count" />
+          <button id="es-add-btn" class="btn btn-primary">Add / set</button>
+        </div>
+        <p id="es-watched-result" class="muted-note" role="status" aria-live="polite"></p>
+        <div id="es-watched-list" class="list"></div>
+      </div>
+
+      <div class="card" id="es-people" hidden>
+        <p class="muted-note">Pick someone, then change how many episodes of a show count for them all-time. Raising it adds to the latest month they watched it; lowering takes from the newest months first. Leaderboards, recaps and /stats update with it. Streak history is untouched.</p>
+        <label for="es-person">Person</label>
+        <select id="es-person"></select>
+        <div id="es-person-totals" class="es-totals"></div>
+        <div class="es-toolbar">
+          <input id="es-person-search" type="search" placeholder="Filter their shows…" />
+          <input id="es-person-add-id" type="number" min="1" placeholder="AniList id" />
+          <input id="es-person-add-eps" type="number" min="0" placeholder="Episodes" />
+          <button id="es-person-add-btn" class="btn btn-primary">Add / set</button>
+        </div>
+        <p id="es-person-result" class="muted-note" role="status" aria-live="polite"></p>
+        <div id="es-person-list" class="list"></div>
+      </div>
+    </section>
+
+    <!-- ANNOUNCEMENT -->
+    <section data-view-panel="announce" class="view-panel" hidden>
+      <div class="overview-grid">
+        <div class="card">
+          <h2>Announcement to every server</h2>
+          <p class="muted-note">Posts once in each server: its AniTracker channel, else its system channel, else the first channel the bot can post in. Silent (no push notification), never pings anyone.</p>
+          <label for="an-title">Title (optional)</label>
+          <input id="an-title" maxlength="200" placeholder="New: ratings & recaps" />
+          <label for="an-message">Message</label>
+          <textarea id="an-message" rows="7" maxlength="3500" placeholder="What’s new, what changed, anything people should know… (Discord markdown works)"></textarea>
+          <label for="an-image">Image (optional https link)</label>
+          <input id="an-image" placeholder="https://…" />
+          <label class="es-check"><input id="an-only" type="checkbox" /> Only servers that set an AniTracker channel</label>
+          <label for="an-test-guild">Send a test to one server first</label>
+          <div class="es-toolbar">
+            <select id="an-test-guild"></select>
+            <button id="an-test-btn" class="btn btn-ghost">Send test</button>
+          </div>
+          <button id="an-send-btn" class="btn btn-danger btn-block">Send to all servers</button>
+          <p id="an-result" class="muted-note" role="status" aria-live="polite"></p>
+          <div id="an-progress" class="es-progress" hidden><div id="an-progress-bar"></div></div>
+          <div id="an-report" class="list"></div>
+        </div>
+        <div class="card card-narrow">
+          <div class="card-header"><h2>Where it goes</h2><span id="an-count" class="badge"></span></div>
+          <div id="an-targets" class="list"></div>
+        </div>
       </div>
     </section>
 

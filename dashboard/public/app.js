@@ -140,6 +140,8 @@ const viewTitles = {
   leaderboards: 'Leaderboards',
   feedback: 'Feedback',
   send: 'Send Message',
+  editstats: 'Edit Stats',
+  announce: 'Announcement',
   controls: 'Bot Controls',
 };
 
@@ -170,6 +172,8 @@ function loadView(view) {
     leaderboards: () => renderLeaderboard(currentTab),
     feedback: () => renderFeedback(currentFeedbackTab),
     send: renderSend,
+    editstats: () => renderEditStats(currentStatsTab),
+    announce: renderAnnounce,
     controls: renderControls,
   };
   const fn = renderers[view];
@@ -600,6 +604,234 @@ async function renderSend() {
     sendBtn: document.getElementById('send-btn'),
     resultEl: document.getElementById('send-result'),
   });
+}
+
+/* ---------------- Edit stats ---------------- */
+
+let currentStatsTab = 'watched';
+document.querySelectorAll('[data-stats-tab]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('[data-stats-tab]').forEach((b) => b.classList.toggle('active', b === btn));
+    currentStatsTab = btn.dataset.statsTab;
+    renderEditStats(currentStatsTab);
+  });
+});
+
+function editRow({ cover, title, url, sub, value, onSave }) {
+  const row = el(`
+    <div class="list-row">
+      ${cover ? `<img class="es-cover" src="${escapeHtml(cover)}" alt="" />` : '<div class="es-cover"></div>'}
+      <div class="row-main">
+        <div class="row-title">${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(title)}</a>` : escapeHtml(title)}</div>
+        <div class="row-sub">${escapeHtml(sub || '')}</div>
+      </div>
+      <div class="es-edit">
+        <input type="number" min="0" value="${Number(value) || 0}" aria-label="New value for ${escapeHtml(title)}" />
+        <button class="btn btn-primary">Save</button>
+      </div>
+    </div>`);
+  const input = row.querySelector('input');
+  const btn = row.querySelector('button');
+  const save = () => withButtonLoading(btn, () => onSave(Number(input.value), row));
+  btn.onclick = save;
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') save();
+  };
+  return row;
+}
+
+async function renderEditStats(tab) {
+  document.getElementById('es-watched').hidden = tab !== 'watched';
+  document.getElementById('es-people').hidden = tab !== 'people';
+  if (tab === 'watched') return renderWatchedEditor();
+  return renderPeopleEditor();
+}
+
+async function renderWatchedEditor() {
+  const listEl = document.getElementById('es-watched-list');
+  const resultEl = document.getElementById('es-watched-result');
+  const search = document.getElementById('es-watched-search');
+  const load = async () => {
+    showSkeletonRows(listEl, 6);
+    const { list, total } = await api(`/stats/watched?q=${encodeURIComponent(search.value.trim())}`);
+    listEl.innerHTML = '';
+    if (!list.length) return listEl.appendChild(el('<div class="empty-state">No shows match.</div>'));
+    if (total > list.length) resultEl.textContent = `Showing the top ${list.length} of ${total}. Search to find others.`;
+    list.forEach((item) =>
+      listEl.appendChild(
+        editRow({
+          cover: item.cover,
+          title: item.title,
+          url: item.siteUrl,
+          sub: `AniList #${item.mediaId} · ${item.count} updates`,
+          value: item.count,
+          onSave: async (count, row) => {
+            try {
+              const r = await api(`/stats/watched/${item.mediaId}`, { method: 'PUT', body: JSON.stringify({ count }) });
+              resultEl.textContent = r.removed ? `Removed ${item.title}.` : `Saved: ${item.title} → ${r.entry.count}`;
+              if (r.removed) row.remove();
+              else row.querySelector('.row-sub').textContent = `AniList #${item.mediaId} · ${r.entry.count} updates`;
+            } catch (err) {
+              resultEl.textContent = `Error: ${err.message}`;
+            }
+          },
+        })
+      )
+    );
+  };
+  let t = null;
+  search.oninput = () => {
+    clearTimeout(t);
+    t = setTimeout(load, 300);
+  };
+  const addBtn = document.getElementById('es-add-btn');
+  addBtn.onclick = () =>
+    withButtonLoading(addBtn, async () => {
+      const id = Number(document.getElementById('es-add-id').value);
+      const count = Number(document.getElementById('es-add-count').value);
+      try {
+        const r = await api(`/stats/watched/${id}`, { method: 'PUT', body: JSON.stringify({ count }) });
+        resultEl.textContent = r.removed ? 'Removed.' : `Saved: ${r.entry.title} → ${r.entry.count}`;
+        await load();
+      } catch (err) {
+        resultEl.textContent = `Error: ${err.message}`;
+      }
+    });
+  await load();
+}
+
+async function renderPeopleEditor() {
+  const select = document.getElementById('es-person');
+  const listEl = document.getElementById('es-person-list');
+  const totalsEl = document.getElementById('es-person-totals');
+  const resultEl = document.getElementById('es-person-result');
+  const search = document.getElementById('es-person-search');
+  const { users } = await api('/stats/users');
+  if (!users.length) {
+    select.innerHTML = '';
+    listEl.innerHTML = '<div class="empty-state">No stats recorded yet.</div>';
+    return;
+  }
+  const keep = select.value;
+  select.innerHTML = users.map((u) => `<option value="${u.anilistId}">${escapeHtml(u.name)} · ${u.episodes} eps${u.edits ? ' · edited' : ''}</option>`).join('');
+  if (keep && users.some((u) => String(u.anilistId) === keep)) select.value = keep;
+  let anime = [];
+  const showTotals = (t) => {
+    totalsEl.innerHTML = `<span><b>${t.episodes}</b> episodes</span><span><b>${Math.round(t.minutes / 60)}</b> hours</span><span><b>${t.anime}</b> anime</span><span><b>${t.completed}</b> completed</span><span><b>${t.months}</b> months</span>`;
+  };
+  const draw = () => {
+    const q = search.value.trim().toLowerCase();
+    listEl.innerHTML = '';
+    const shown = anime.filter((a) => !q || a.title.toLowerCase().includes(q) || String(a.mediaId) === q);
+    if (!shown.length) return listEl.appendChild(el('<div class="empty-state">No shows.</div>'));
+    for (const a of shown.slice(0, 200)) {
+      listEl.appendChild(
+        editRow({
+          cover: a.cover,
+          title: a.title,
+          url: `https://anilist.co/anime/${a.mediaId}`,
+          sub: `AniList #${a.mediaId} · ${a.eps} eps · ${a.months.length} month${a.months.length === 1 ? '' : 's'}${a.freaky ? ' · counts as freaky' : ''}`,
+          value: a.eps,
+          onSave: (eps) => saveEps(a.mediaId, eps, a.title),
+        })
+      );
+    }
+  };
+  const load = async () => {
+    showSkeletonRows(listEl, 6);
+    const data = await api(`/stats/users/${select.value}`);
+    anime = data.anime;
+    showTotals(data.totals);
+    draw();
+  };
+  const saveEps = async (mediaId, episodes, title) => {
+    try {
+      const r = await api(`/stats/users/${select.value}/anime/${mediaId}`, { method: 'PUT', body: JSON.stringify({ episodes }) });
+      resultEl.textContent = `Saved: ${title || `#${mediaId}`} ${r.before} → ${r.after} episodes`;
+      await load();
+    } catch (err) {
+      resultEl.textContent = `Error: ${err.message}`;
+    }
+  };
+  select.onchange = load;
+  search.oninput = draw;
+  const addBtn = document.getElementById('es-person-add-btn');
+  addBtn.onclick = () =>
+    withButtonLoading(addBtn, () => saveEps(Number(document.getElementById('es-person-add-id').value), Number(document.getElementById('es-person-add-eps').value)));
+  await load();
+}
+
+/* ---------------- Announcement ---------------- */
+
+let announcePoll = null;
+
+async function renderAnnounce() {
+  const targetsEl = document.getElementById('an-targets');
+  const countEl = document.getElementById('an-count');
+  const testSel = document.getElementById('an-test-guild');
+  const resultEl = document.getElementById('an-result');
+  const reportEl = document.getElementById('an-report');
+  const progress = document.getElementById('an-progress');
+  const bar = document.getElementById('an-progress-bar');
+  showSkeletonRows(targetsEl, 6);
+  const t = await api('/announce/targets');
+  countEl.textContent = `${t.reachable} / ${t.total}`;
+  targetsEl.innerHTML = '';
+  for (const g of t.servers) {
+    targetsEl.appendChild(
+      el(`<div class="list-row"><div class="row-main"><div class="row-title">${escapeHtml(g.name)}</div><div class="row-sub">${g.channel ? `${escapeHtml(g.channel)} · ${escapeHtml(g.how)}` : 'No channel the bot can post in'}${g.members ? ` · ${g.members} members` : ''}</div></div></div>`)
+    );
+  }
+  testSel.innerHTML = t.servers.filter((g) => g.channel).map((g) => `<option value="${g.guildId}">${escapeHtml(g.name)}</option>`).join('');
+
+  const body = (test) =>
+    JSON.stringify({
+      title: document.getElementById('an-title').value.trim(),
+      message: document.getElementById('an-message').value,
+      imageUrl: document.getElementById('an-image').value.trim() || null,
+      onlyConfigured: document.getElementById('an-only').checked,
+      test: test || null,
+    });
+
+  const watch = () => {
+    clearInterval(announcePoll);
+    progress.hidden = false;
+    announcePoll = setInterval(async () => {
+      try {
+        const st = await api('/announce/status');
+        bar.style.width = `${st.total ? Math.round((st.done / st.total) * 100) : 100}%`;
+        resultEl.textContent = st.running ? `Sending… ${st.done} / ${st.total}` : `${st.test ? 'Test sent' : 'Done'}: ${st.sent} sent · ${st.failed.length} failed · ${st.skipped.length} skipped`;
+        if (!st.running) {
+          clearInterval(announcePoll);
+          reportEl.innerHTML = '';
+          for (const f of [...st.failed.map((x) => ({ ...x, kind: 'Failed' })), ...st.skipped.map((x) => ({ ...x, kind: 'Skipped' }))]) {
+            reportEl.appendChild(el(`<div class="list-row"><div class="row-main"><div class="row-title">${escapeHtml(f.name)}</div><div class="row-sub">${f.kind}: ${escapeHtml(f.reason)}</div></div></div>`));
+          }
+        }
+      } catch {
+        clearInterval(announcePoll);
+      }
+    }, 1000);
+  };
+
+  document.getElementById('an-test-btn').onclick = async (e) => {
+    try {
+      await withButtonLoading(e.currentTarget, () => api('/announce', { method: 'POST', body: body(testSel.value) }));
+      watch();
+    } catch (err) {
+      resultEl.textContent = `Error: ${err.message}`;
+    }
+  };
+  document.getElementById('an-send-btn').onclick = async (e) => {
+    const n = document.getElementById('an-only').checked ? t.configured : t.reachable;
+    if (!confirm(`Send this announcement to ${n} server${n === 1 ? '' : 's'}? This can't be undone.`)) return;
+    try {
+      await withButtonLoading(e.currentTarget, () => api('/announce', { method: 'POST', body: body(null) }));
+      watch();
+    } catch (err) {
+      resultEl.textContent = `Error: ${err.message}`;
+    }
+  };
 }
 
 /* ---------------- Controls ---------------- */

@@ -84,7 +84,7 @@ function commandFeedback(data) {
 // client: the discord.js Client instance (for live guild/channel/user info)
 // deps: { loadData, saveData, getPaused, setPaused, botStartedAt, getInviteUrl, storageBackend, isStorageHealthy }
 function buildDashboardRouter(client, deps) {
-  const { loadData, saveData, getPaused, setPaused, botStartedAt, getInviteUrl, storageBackend, isStorageHealthy, loadSocial } = deps;
+  const { loadData, saveData, getPaused, setPaused, botStartedAt, getInviteUrl, storageBackend, isStorageHealthy, loadSocial, loadStats, saveStats, announce } = deps;
   const router = express.Router();
 
   router.use(express.json({ limit: '100kb' }));
@@ -393,6 +393,126 @@ function buildDashboardRouter(client, deps) {
       } catch (e) {
         res.status(500).json({ error: `Failed to send: ${e.message}` });
       }
+    })
+  );
+
+  // ---- Edit stats ----------------------------------------------------------
+  const statsAdmin = require('../features/statsAdmin');
+  const { getMediaLite } = require('../features/anilistSocial');
+
+  // All-time watches: every show (not just the top 25), editable.
+  router.get(
+    '/stats/watched',
+    wrap(async (req, res) => {
+      const data = await loadData();
+      const q = String(req.query.q || '').trim().toLowerCase();
+      let list = Object.entries(data.watchStats || {}).map(([mediaId, s]) => ({ mediaId, title: s.title, siteUrl: s.siteUrl, cover: s.cover || null, count: s.count }));
+      if (q) list = list.filter((x) => (x.title || '').toLowerCase().includes(q) || x.mediaId === q);
+      list.sort((a, b) => b.count - a.count);
+      res.json({ list: list.slice(0, 300), total: list.length });
+    })
+  );
+
+  router.put(
+    '/stats/watched/:mediaId',
+    wrap(async (req, res) => {
+      const mediaId = parseInt(req.params.mediaId, 10);
+      const count = Number(req.body?.count);
+      if (!mediaId || !Number.isFinite(count) || count < 0) return res.status(400).json({ error: 'mediaId and a count of 0 or more are required.' });
+      const data = await loadData();
+      let info = {};
+      if (!data.watchStats?.[mediaId]) {
+        const m = await getMediaLite(mediaId).catch(() => null);
+        if (!m) return res.status(404).json({ error: 'AniList has no anime with that id (or isn’t answering).' });
+        info = { title: m.title?.english || m.title?.romaji, siteUrl: m.siteUrl, cover: m.coverImage?.large || null };
+      }
+      const entry = statsAdmin.setWatchCount(data, mediaId, count, info);
+      await saveData(data);
+      res.json({ ok: true, entry, removed: !entry });
+    })
+  );
+
+  // People with stats (tracked or signed in), with their all-time totals.
+  router.get(
+    '/stats/users',
+    wrap(async (req, res) => {
+      if (!loadStats) return res.status(500).json({ error: 'Stats storage not available.' });
+      const data = await loadData();
+      const st = await loadStats();
+      const names = new Map();
+      for (const g of Object.values(data.guilds)) for (const u of g.users || []) names.set(String(u.id), { name: u.username, avatar: u.avatar || null });
+      for (const a of Object.values(data.linkedAccounts || {})) if (!names.has(String(a.anilistId))) names.set(String(a.anilistId), { name: a.anilistName, avatar: a.avatar || null });
+      const users = Object.keys(st.users || {})
+        .map((id) => ({ anilistId: Number(id), name: names.get(id)?.name || `AniList #${id}`, avatar: names.get(id)?.avatar || null, ...statsAdmin.userTotals(st, id), edits: st.users[id].adminEdits || 0 }))
+        .filter((u) => u.episodes > 0 || names.has(String(u.anilistId)))
+        .sort((a, b) => b.episodes - a.episodes);
+      res.json({ users });
+    })
+  );
+
+  router.get(
+    '/stats/users/:anilistId',
+    wrap(async (req, res) => {
+      const st = await loadStats();
+      const id = parseInt(req.params.anilistId, 10);
+      if (!st.users?.[String(id)]) return res.status(404).json({ error: 'No stats for that account yet.' });
+      res.json({ anilistId: id, totals: statsAdmin.userTotals(st, id), anime: statsAdmin.animeTotals(st, id) });
+    })
+  );
+
+  router.put(
+    '/stats/users/:anilistId/anime/:mediaId',
+    wrap(async (req, res) => {
+      const id = parseInt(req.params.anilistId, 10);
+      const mediaId = parseInt(req.params.mediaId, 10);
+      const episodes = Number(req.body?.episodes);
+      if (!id || !mediaId || !Number.isFinite(episodes) || episodes < 0) return res.status(400).json({ error: 'Episodes must be 0 or more.' });
+      const st = await loadStats();
+      if (!st.media?.[mediaId]) {
+        // A show they never had: remember its title/cover so stats can show it.
+        const m = await getMediaLite(mediaId).catch(() => null);
+        if (!m) return res.status(404).json({ error: 'AniList has no anime with that id (or isn’t answering).' });
+        st.media ||= {};
+        st.media[mediaId] = { t: m.title?.english || m.title?.romaji, c: m.coverImage?.large || null, g: (m.genres || []).slice(0, 4), u: m.siteUrl, ...(m.bannerImage ? { b: m.bannerImage } : {}), ...(m.episodes ? { n: m.episodes } : {}) };
+      }
+      try {
+        const out = statsAdmin.setAnimeEpisodes(st, id, mediaId, episodes, { minutesPerEp: null });
+        saveStats();
+        console.log(`[dashboard] stats edit: AniList ${id}, anime ${mediaId}: ${out.before} → ${out.after} eps`);
+        res.json({ ok: true, ...out, totals: statsAdmin.userTotals(st, id) });
+      } catch (e) {
+        res.status(400).json({ error: e.message });
+      }
+    })
+  );
+
+  // ---- Announcement (every server) ---------------------------------------
+  router.get(
+    '/announce/targets',
+    wrap(async (req, res) => {
+      if (!announce) return res.status(500).json({ error: 'Announcements are not available.' });
+      res.json(await announce.targets());
+    })
+  );
+
+  router.post(
+    '/announce',
+    wrap(async (req, res) => {
+      if (!announce) return res.status(500).json({ error: 'Announcements are not available.' });
+      const { title, message, imageUrl, onlyConfigured, test } = req.body || {};
+      if (typeof message !== 'string' || !message.trim()) return res.status(400).json({ error: 'Write a message first.' });
+      if (message.length > 3500) return res.status(400).json({ error: 'Keep it under 3500 characters.' });
+      if (imageUrl && !/^https:\/\/\S+$/i.test(imageUrl)) return res.status(400).json({ error: 'The image must be an https:// link.' });
+      if (announce.status().running) return res.status(409).json({ error: 'An announcement is already being sent.' });
+      const job = announce.start({ title: (title || '').slice(0, 200), message, imageUrl: imageUrl || null, onlyConfigured: Boolean(onlyConfigured), testGuildId: test ? String(test) : null });
+      res.json({ ok: true, ...job });
+    })
+  );
+
+  router.get(
+    '/announce/status',
+    wrap(async (req, res) => {
+      res.json(announce ? announce.status() : { running: false });
     })
   );
 

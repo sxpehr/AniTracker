@@ -7,12 +7,13 @@ const statsUi = require('./statsUi');
 const { paletteFor, bannerUrlFor, headerUrlFor, hdCover, collageUrl, warmHeader } = require('./themes');
 const { getMediaLite, getProfileSnapshot } = require('./anilistSocial');
 const { ctx } = require('./ctx');
+const artRoutes = require('./artRoutes');
 const { getRecentActivities } = require('../anilist');
 
 /* ---------------------------------------------------------------------------
  * /profile — a personal anime page, built as an interactive card.
  *
- *   Overview | Favorites | Reviews | Recs | Collections | Stats | Activity
+ *   Overview | Favorites | Reviews | Collections | Stats | Activity
  *
  * The Overview is assembled from the sections the owner picked in /settings,
  * in the order their layout defines, and painted in their theme colours.
@@ -41,12 +42,10 @@ const TABS = {
 // One consistent nav block: same emoji style and label length everywhere,
 // the current tab in the accent (blurple), the rest neutral. Customizing
 // lives in /settings, not here.
-function navRows(ownerId, tab, { anilistUrl }) {
+function navRows(ownerId, tab) {
   const b = (t) =>
     ui.button(`p:t:${ownerId}:${t}:0:n`, TABS[t].label, { emoji: TABS[t].emoji, style: t === tab ? ui.ButtonStyle.Primary : ui.ButtonStyle.Secondary });
-  const row2 = [b('collections'), b('stats'), b('activity')];
-  if (anilistUrl) row2.push(ui.linkButton(anilistUrl, 'AniList', '🔗'));
-  return [ui.actionRow(b('overview'), b('favorites'), b('reviews'), b('recs')), ui.actionRow(row2)];
+  return [ui.actionRow(b('overview'), b('favorites'), b('reviews')), ui.actionRow(b('collections'), b('stats'), b('activity'))];
 }
 
 async function discordUser(id) {
@@ -132,9 +131,19 @@ const parts = {
     return out;
   },
 
+  // In Rotation: the top shows as cards in one image (cover in a progress
+  // ring, title, season · progress · status, tags). Text rows if images are off.
   rotation: ({ rotation, pal }) => {
     if (!rotation?.length) return [];
-    return [ui.text(ui.label(`In Rotation · ${rotation.length}`)), ...collections.rotationRows(rotation.slice(0, 2), pal.accent)];
+    const top = rotation.slice(0, artRoutes.ROTATION_CARDS);
+    const url = artRoutes.rotationUrl(top);
+    const g = url ? ui.gallery([{ url, description: top.map((e) => e.title).join(' · ') }]) : null;
+    const out = [ui.text(`${ui.label(`In Rotation · ${rotation.length}`)}${rotation.length > top.length ? `\n-# +${rotation.length - top.length} more in Collections → In Rotation` : ''}`)];
+    if (g) {
+      artRoutes.warm(url);
+      out.push(g);
+    } else out.push(...collections.rotationRows(rotation.slice(0, 2), pal.accent));
+    return out;
   },
 
   opening: ({ u }) => {
@@ -375,7 +384,7 @@ async function renderProfile({ ownerId, viewerId, tab = 'overview', page = 0, us
     children.push(...(await tabBlocks(tab, d, page)));
   }
   children.push(ui.divider());
-  children.push(...navRows(ownerId, tab, { anilistUrl: al?.siteUrl }));
+  children.push(...navRows(ownerId, tab));
   return ui.fit([ui.card(pal.accent, children)]);
 }
 

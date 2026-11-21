@@ -2,6 +2,7 @@ const ui = require('./ui');
 const social = require('./social');
 const engine = require('./statsEngine');
 const { ctx } = require('./ctx');
+const artRoutes = require('./artRoutes');
 const { getEntriesForMedia } = require('../anilist');
 const { getMediaLite, titleOf } = require('./anilistSocial');
 
@@ -74,8 +75,13 @@ async function historyPayload(guildId, page = 0, query = '') {
   if (!slice.length) children.push(ui.text(q ? '*Nobody here has watched anything matching that. Try `/watched anime:` to check AniList directly.*' : '*Nothing logged yet — history builds up as activity posts.*'));
   else {
     if (page === 0) {
-      const g = ui.coverGallery(slice.slice(0, 4).map((x) => ({ url: x.c, description: x.t })));
-      if (g) children.push(g);
+      const top = slice.slice(0, 4);
+      const bl = artRoutes.bannerListUrl(top.map((x) => ({ mediaId: x.mediaId, detail: `${x.watchers.size} watched · ${ui.num(x.eps)} eps` })));
+      const g = bl ? ui.gallery([{ url: bl, description: top.map((x) => x.t).join(' · ') }]) : null;
+      if (g) {
+        artRoutes.warm(bl);
+        children.push(g);
+      }
     }
     children.push(
       ui.text(
@@ -126,17 +132,18 @@ async function animePayload(guildId, mediaId) {
         .filter((x) => x.eps > 0);
 
   const total = media?.episodes || null;
+  const banner = media?.bannerImage || st.media[mediaId]?.b || null;
   const children = [
-    ui.row(
+    banner ? ui.gallery([{ url: banner, description: title }]) : null,
+    ui.text(
       [
         '-# 🔎 WHO WATCHED IT',
         `## [${ui.esc(ui.clip(title, 80))}](${url})`,
         entries ? `-# ${rows.length} of ${list.length} watchers here have it on AniList` : '-# ⚠️ AniList didn’t answer — showing what AniTracker logged instead',
-      ],
-      media?.coverImage?.extraLarge || media?.coverImage?.large || st.media[mediaId]?.c
+      ].join('\n')
     ),
     ui.divider(),
-  ];
+  ].filter(Boolean);
   if (rows.length) {
     const groups = new Map();
     for (const r of rows) {
@@ -151,7 +158,7 @@ async function animePayload(guildId, mediaId) {
         `**${meta.emoji} ${meta.label}** · ${g.length}\n${g
           .slice(0, 12)
           .map((r) => {
-            const prog = k === 'COMPLETED' ? (r.repeat ? `rewatched ${r.repeat}×` : '') : r.progress ? `ep ${r.progress}${total ? `/${total}` : ''}` : '';
+            const prog = k === 'COMPLETED' ? (r.repeat ? `rewatched ${r.repeat}×` : '') : r.progress ? `${total ? `\`${ui.bar(r.progress, total, 8)}\` ` : ''}ep ${r.progress}${total ? `/${total}` : ''}` : '';
             return `${who(r.p)}${prog ? ` · ${prog}` : ''}${r.score ? ` · ⭐ ${Number(r.score).toFixed(1).replace(/\.0$/, '')}` : ''}`;
           })
           .join('\n')}`
@@ -196,8 +203,13 @@ async function userPayload(guildId, ownerId, viewerId, page = 0) {
   else if (!slice.length) children.push(ui.text('*Nothing logged yet.*'));
   else {
     if (page === 0) {
-      const g = ui.coverGallery(slice.slice(0, 4).map((x) => ({ url: x.c, description: x.t })));
-      if (g) children.push(g);
+      const top = slice.slice(0, 4);
+      const bl = artRoutes.bannerListUrl(top.map((x) => ({ mediaId: x.mediaId, detail: `${ui.num(x.eps)} eps · last ${engine.monthName(x.last, false)}` })));
+      const g = bl ? ui.gallery([{ url: bl, description: top.map((x) => x.t).join(' · ') }]) : null;
+      if (g) {
+        artRoutes.warm(bl);
+        children.push(g);
+      }
     }
     children.push(
       ui.text(

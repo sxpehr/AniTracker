@@ -1,3 +1,37 @@
+# Classic posts, rotation cards, picture leaderboards, flood protection & portal tools
+
+Merge and Render deploys it. One new dependency (`@napi-rs/canvas`, prebuilt — no setup) draws the new images with the bundled Montserrat font (`assets/fonts`, OFL licence).
+
+## Restore point
+- `restore/before-classic-posts` — the bot exactly as it was before this batch (the modern-layout version you merged in PR #2).
+  To go back: `git fetch origin && git reset --hard origin/restore/before-classic-posts && git push --force origin main`.
+
+## Activity posts
+- **Back to the classic embed**, with the **AniList profile picture** in the author line again and the big cover.
+- Kept from the new version: profile **status** (in the author line), **progress bar** for the season (`▰▰▰▰▱▱ 7 / 12 · 58% · ep 8 in 2 days`), **AniList tags** instead of genres, the server's **community score**, and the **⭐ Rate** button. Buttons: Like · Rate · Review · Save · More info.
+- 18+ titles set to "hide" post without the cover (embeds can't blur).
+
+## Flood protection (new)
+Per person, per check: several updates for one show are merged ("episodes 3 - 5"; episodes then Completed → just Completed), anything already posted in the last 12 h is skipped (including episodes an earlier post covered), and only the newest **3** post on their own. The rest, plus anything older than 6 h, become **one "📦 Caught up on N updates" post**. Admins can change the 3 in `/serversettings` → Activity feed. Max 12 separate posts per server per check.
+
+## Profile
+- **In Rotation** is now an image of cards like your reference: cover in a progress ring coloured from the cover, title, `S1 | 3 / 10 | ▶ Watching`, and tag pills. **3 cards**, not 4: at 4 the season/progress row is unreadable on phones. The same cards top the In Rotation list in Collections.
+- Removed the **Recs** and **AniList** buttons (Recs is still reachable from "My recommendations").
+
+## Leaderboards & recaps
+- `/leaderboard` is an image: rank badges, **AniList profile pictures**, display names, a **progress bar** against the leader, the value and a detail line (top show, hours, best streak, average rating…). Names stay clickable under the image.
+- **Episodes** board adds banners of what the server watches most this month. **Freakiest** board lists each person's freaky shows and shows the freaky picks as banners (still off unless admins turn it on).
+- **Server recaps:** "Most hours" is the same picture board, "Also popular" shows are banners, and a **😳 Freakiest this week/month** section appears where that board is on.
+- **Personal recap & /stats:** top anime as banners instead of small covers, plus a freaky corner if you watched any.
+- **Ratings & /watched:** scores show as progress bars instead of stars, cover thumbnails replaced with banners.
+- Anywhere images can't be made (no public URL), it falls back to text with bars.
+
+## Developer portal
+- **Edit Stats:** *All-time watches* (the "Most watched" counter — set, add by AniList id, or 0 to remove) and *Person's anime stats* (pick someone, change their all-time episodes for any show; totals, leaderboards and recaps follow; streaks untouched).
+- **Announcement:** one message to every server (AniTracker channel → system channel → first open channel), optional title and image, "only servers with an AniTracker channel" option, **send a test to one server first**, live progress and a failed/skipped report. Silent, never pings.
+
+---
+
 # Recaps, modern layout, tags, admin panel & the "not posting" fix
 
 Push and Render deploys it — slash commands sync themselves on startup. Nothing to configure.

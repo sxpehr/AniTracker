@@ -140,15 +140,16 @@ function savedCard(media, r, guildId, core, s, userId) {
   const snap = snapshot(media);
   const here = scoresFor(core, s, guildId, media.id);
   const a = avg(here);
+  const head = media.bannerImage ? ui.gallery([{ url: media.bannerImage, description: snap.title }]) : null;
   return ui.fit([
     ui.card(ACCENT, [
-      ui.row(
+      head,
+      ui.text(
         [
           '-# ⭐ RATED',
           `### ${ui.esc(snap.title)}`,
-          `${ui.stars10(r.s)}  **${r.s}/10** · ${LABELS[r.s]}${r.n ? `\n> ${ui.softEsc(r.n)}` : ''}\n-# ${here.length > 1 ? `Server average **${a.toFixed(1)}** from ${here.length} people` : 'You’re the first here to rate it'}`,
-        ],
-        snap.cover
+          `\`${ui.bar(r.s, 10, 10)}\`  **${r.s}/10** · ${LABELS[r.s]}${r.n ? `\n> ${ui.softEsc(r.n)}` : ''}\n-# ${here.length > 1 ? `Server average **${a.toFixed(1)}** from ${here.length} people` : 'You’re the first here to rate it'}`,
+        ].join('\n')
       ),
       ui.actionRow(
         ui.button(`rt:a:${media.id}`, 'Everyone’s ratings', { emoji: '👥', style: ui.ButtonStyle.Primary }),
@@ -189,24 +190,24 @@ async function animePayload(guildId, mediaId, viewerId) {
   const url = media?.siteUrl || `https://anilist.co/anime/${mediaId}`;
   const a = avg(list);
   const children = [
-    ui.row(
+    media?.bannerImage ? ui.gallery([{ url: media.bannerImage, description: title }]) : null,
+    ui.text(
       [
         '-# ⭐ RATINGS IN THIS SERVER',
         `## [${ui.esc(ui.clip(title, 80))}](${url})`,
         list.length
-          ? `${ui.stars10(a)}  **${a.toFixed(1)}/10** from ${list.length} ${list.length === 1 ? 'person' : 'people'}${typeof media?.averageScore === 'number' ? ` · AniList ${(media.averageScore / 10).toFixed(1)}` : ''}`
+          ? `\`${ui.bar(a, 10, 10)}\`  **${a.toFixed(1)}/10** from ${list.length} ${list.length === 1 ? 'person' : 'people'}${typeof media?.averageScore === 'number' ? ` · AniList ${(media.averageScore / 10).toFixed(1)}` : ''}`
           : `-# Nobody here has rated it yet${typeof media?.averageScore === 'number' ? ` · AniList ${(media.averageScore / 10).toFixed(1)}` : ''}`,
-      ],
-      media?.coverImage?.extraLarge || media?.coverImage?.large || list[0]?.c
+      ].join('\n')
     ),
-  ];
+  ].filter(Boolean);
   if (list.length) {
     children.push(ui.divider());
     children.push(
       ui.text(
         list
           .slice(0, 20)
-          .map((r) => `**${r.s}**/10 ${ui.stars10(r.s)} · <@${r.userId}>${r.review ? ' · ✍️ review' : ''}${r.n ? `\n-# “${ui.softEsc(ui.clip(r.n, 110))}”` : ''}`)
+          .map((r) => `\`${ui.bar(r.s, 10, 10)}\` **${r.s}**/10 · <@${r.userId}>${r.review ? ' · ✍️ review' : ''}${r.n ? `\n-# “${ui.softEsc(ui.clip(r.n, 110))}”` : ''}`)
           .join('\n')
       )
     );
@@ -242,12 +243,18 @@ async function userPayload(ownerId, viewerId, page = 0, sort = 'high') {
     children.push(ui.text(own ? '*Tap ⭐ **Rate** on any activity post, or use `/rate`.*' : '*They haven’t rated anything yet.*'));
   } else {
     const slice = list.slice(page * PAGE, page * PAGE + PAGE);
-    const g = ui.coverGallery(slice.slice(0, 4).map((r) => ({ url: r.c, description: `${r.t} · ${r.s}/10` })));
-    if (g) children.push(g);
+    const artRoutes = require('./artRoutes');
+    const top5 = slice.slice(0, 5);
+    const bl = artRoutes.bannerListUrl(top5.map((r) => ({ mediaId: r.mediaId, detail: `${r.s}/10 · ${LABELS[r.s] || ''}${r.n ? ` · “${r.n}”` : ''}` })), null, { start: page * PAGE + 1 });
+    const g = bl ? ui.gallery([{ url: bl, description: top5.map((r) => `${r.t} · ${r.s}/10`).join(' · ') }]) : null;
+    if (g) {
+      artRoutes.warm(bl);
+      children.push(g);
+    }
     children.push(
       ui.text(
         slice
-          .map((r, i) => `\`${String(page * PAGE + i + 1).padStart(2, '0')}\` **${r.s}**/10 ${ui.stars10(r.s)} · [${ui.esc(ui.clip(r.t || `#${r.mediaId}`, 55))}](${r.u || `https://anilist.co/anime/${r.mediaId}`})${r.n ? `\n-# “${ui.softEsc(ui.clip(r.n, 100))}”` : ''}`)
+          .map((r, i) => `\`${String(page * PAGE + i + 1).padStart(2, '0')}\` \`${ui.bar(r.s, 10, 8)}\` **${r.s}**/10 · [${ui.esc(ui.clip(r.t || `#${r.mediaId}`, 55))}](${r.u || `https://anilist.co/anime/${r.mediaId}`})${r.n ? `\n-# “${ui.softEsc(ui.clip(r.n, 100))}”` : ''}`)
           .join('\n')
       )
     );
@@ -277,15 +284,21 @@ async function boardPayload(guildId, page = 0) {
   else {
     const slice = board.slice(page * 10, page * 10 + 10);
     if (page === 0) {
-      const g = ui.coverGallery(slice.slice(0, 3).map((x) => ({ url: x.c, description: `${x.t} · ${x.avg.toFixed(1)}` })));
-      if (g) children.push(g);
+      const artRoutes = require('./artRoutes');
+      const top = slice.slice(0, 3);
+      const bl = artRoutes.bannerListUrl(top.map((x) => ({ mediaId: x.mediaId, detail: `${x.avg.toFixed(1)}/10 · ${x.count} rating${x.count === 1 ? '' : 's'}` })));
+      const g = bl ? ui.gallery([{ url: bl, description: top.map((x) => `${x.t} · ${x.avg.toFixed(1)}`).join(' · ') }]) : null;
+      if (g) {
+        artRoutes.warm(bl);
+        children.push(g);
+      }
     }
     children.push(
       ui.text(
         slice
           .map((x, i) => {
             const n = page * 10 + i;
-            return `${medals[n] || `\`#${n + 1}\``} **[${ui.esc(ui.clip(x.t || `#${x.mediaId}`, 55))}](${x.u || `https://anilist.co/anime/${x.mediaId}`})**\n-# ${ui.stars10(x.avg)} **${x.avg.toFixed(1)}** · ${x.count} rating${x.count === 1 ? '' : 's'}`;
+            return `${medals[n] || `\`#${n + 1}\``} **[${ui.esc(ui.clip(x.t || `#${x.mediaId}`, 55))}](${x.u || `https://anilist.co/anime/${x.mediaId}`})**\n\`${ui.bar(x.avg, 10, 12)}\` **${x.avg.toFixed(1)}** · ${x.count} rating${x.count === 1 ? '' : 's'}`;
           })
           .join('\n')
       )

@@ -775,3 +775,20 @@ select {
 .text-danger { color: var(--danger); font-weight: 600; }
 .feedback-card .card-header { justify-content: flex-start; margin-bottom: var(--s-3); }
 .avatar-xs { border-radius: var(--r-full); object-fit: cover; }
+
+/* ---------- Edit stats & announcement ---------- */
+.es-toolbar { display: flex; gap: var(--s-2); align-items: center; margin: var(--s-3) 0; flex-wrap: wrap; }
+.es-toolbar input[type="search"] { flex: 2 1 220px; }
+.es-toolbar input[type="number"] { flex: 1 1 110px; max-width: 150px; }
+.es-toolbar select { flex: 1 1 200px; }
+.es-toolbar .btn { flex-shrink: 0; }
+.es-edit { display: flex; gap: var(--s-2); align-items: center; flex-shrink: 0; }
+.es-edit input { width: 96px; padding: 6px 10px; font-family: var(--font-mono); }
+.es-edit .btn { padding: 6px 12px; }
+.es-cover { width: 34px; height: 48px; border-radius: 6px; object-fit: cover; background: var(--surface-1); flex-shrink: 0; }
+.es-totals { display: flex; gap: var(--s-4); flex-wrap: wrap; margin: var(--s-3) 0; font-size: 13px; color: var(--text-muted); }
+.es-totals b { color: var(--text); font-family: var(--font-mono); }
+.es-check { display: flex; align-items: center; gap: var(--s-2); margin-top: var(--s-4); cursor: pointer; }
+.es-check input { width: auto; }
+.es-progress { height: 8px; border-radius: 99px; background: var(--surface-3); overflow: hidden; margin: var(--s-3) 0; }
+.es-progress > div { height: 100%; width: 0; background: var(--accent); transition: width .3s var(--ease); }

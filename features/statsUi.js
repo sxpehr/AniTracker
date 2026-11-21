@@ -106,8 +106,8 @@ async function monthBlocks({ st, su, al, tz }, ym, { compact = false } = {}) {
   const g = ui.coverGallery(top.slice(0, 4).map((a) => ({ url: a.c, description: a.t })));
   if (g) blocks.push(g);
   blocks.push(ui.text(top.map((a, i) => `\`${String(i + 1).padStart(2, '0')}\` **${a.u ? `[${ui.esc(ui.clip(a.t, 60))}](${a.u})` : ui.esc(a.t)}** · ${a.eps} ep${a.eps === 1 ? '' : 's'}`).join('\n')));
-  if (sum.topGenres.length) {
-    blocks.push(ui.text(`${ui.label('Top genres')}\n${genreBars(sum.topGenres.map((x) => ({ name: x.genre, value: x.eps })))}`));
+  if (sum.topTags.length) {
+    blocks.push(ui.text(`${ui.label('Your vibe this month')}\n${genreBars(sum.topTags.map((x) => ({ name: x.genre, value: x.eps })))}`));
   }
   const months = engine.lastMonths(ym, 6);
   const values = months.map((m) => su?.months?.[m]?.e || 0);
@@ -156,7 +156,8 @@ async function lifetimeBlocks({ al, su }) {
       ui.row([ui.label('Highest rated ever'), `**[${ui.esc(titleOf(L.topRated.media))}](${L.topRated.media.siteUrl})**`, `-# ${L.topRated.score}/10`], L.topRated.media.coverImage?.large)
     );
   }
-  if (L.genres.length) blocks.push(ui.text(`${ui.label('Most watched genres')}\n${genreBars(L.genres.map((g) => ({ name: g.genre, value: g.count })), 'anime', 5)}`));
+  const lifeTags = L.tags?.length ? L.tags : L.genres;
+  if (lifeTags.length) blocks.push(ui.text(`${ui.label(L.tags?.length ? 'What you watch most' : 'Most watched genres')}\n${genreBars(lifeTags.map((g) => ({ name: g.genre, value: g.count })), 'anime', 5)}`));
   const months = Object.entries(su?.months || {}).sort((a, b) => b[1].e - a[1].e);
   if (months.length) blocks.push(ui.text(`-# Most active month since tracking began: **${engine.monthName(months[0][0])}** · ${ui.num(months[0][1].e)} episodes`));
   return blocks;
@@ -220,6 +221,8 @@ async function statsPayload(ownerId, viewerId, tab = 'month', ym = null) {
 
 /* --------------------------------- /recap --------------------------------- */
 
+// The recap card itself. Month picker / compare / DM controls are added by
+// features/recaps.js (personalRecap).
 async function recapPayload(ownerId, viewerId, ym, { shareable = true } = {}) {
   const g = await gather(ownerId);
   const sum = engine.monthSummary(g.st, g.su, ym);
@@ -267,9 +270,9 @@ async function recapPayload(ownerId, viewerId, ym, { shareable = true } = {}) {
     const gal = ui.coverGallery(rest.map((a) => ({ url: a.c, description: a.t })), { single: 'row' });
     if (gal) children.push(gal);
   }
-  if (sum.topGenres.length) {
+  if (sum.topTags.length) {
     children.push(
-      ui.text(`${ui.label('Your genre')}\n## ${ui.esc(sum.topGenres[0].genre)}\n${genreBars(sum.topGenres.slice(0, 3).map((x) => ({ name: x.genre, value: x.eps })), 'eps', 3)}`)
+      ui.text(`${ui.label('Your vibe')}\n## ${ui.esc(sum.topTags[0].genre)}\n${genreBars(sum.topTags.slice(0, 3).map((x) => ({ name: x.genre, value: x.eps })), 'eps', 3)}`)
     );
   }
   if (scored.length) {
@@ -395,7 +398,7 @@ async function onComponent(interaction) {
     const [, kind, owner, ym] = parts;
     if (kind === 'open') {
       await interaction.deferReply({ flags: ui.EPHEMERAL }).catch(() => {});
-      return interaction.editReply(await recapPayload(owner, me, ym)).catch(() => {});
+      return interaction.editReply(await require('./recaps').personalRecap(owner, me, ym, { shareable: true })).catch(() => {});
     }
     if (kind === 'share') {
       if (owner !== me) return interaction.reply({ content: 'Only the owner can share their recap.', flags: ui.EPHEMERAL }).catch(() => {});

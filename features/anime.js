@@ -25,11 +25,9 @@ function actionRow(mediaId) {
   );
 }
 
-async function infoPayload(mediaId) {
-  const payload = ctx.buildMoreInfoPayload ? await ctx.buildMoreInfoPayload(mediaId) : null;
-  if (!payload) return null;
-  payload.embeds[0].setFooter({ text: 'Data from AniList' });
-  return { ...payload, components: [...payload.components, actionRow(mediaId)] };
+async function infoPayload(mediaId, { lead } = {}) {
+  const payload = ctx.buildMoreInfoPayload ? await ctx.buildMoreInfoPayload(mediaId, { actions: actionRow(mediaId), footer: 'Data from AniList', lead }) : null;
+  return payload || null;
 }
 
 function describe(m) {
@@ -93,11 +91,10 @@ async function handleCommand(interaction) {
     return ctx.respond(interaction, listPayload(label, 'Live from AniList', list));
   }
   if (sub === 'random') {
-    const id = await getRandomAnime(interaction.options.getString('genre')).catch(() => null);
+    const id = await getRandomAnime(interaction.options.getString('genre'), false, interaction.options.getString('vibe')).catch(() => null);
     if (!id) return ctx.respond(interaction, { content: AL_DOWN });
-    const payload = await infoPayload(id);
+    const payload = await infoPayload(id, { lead: '### 🎲 How about this one?' });
     if (!payload) return ctx.respond(interaction, { content: AL_DOWN });
-    payload.content = '🎲 How about this one?';
     return ctx.respond(interaction, payload);
   }
   if (sub === 'airing') {

@@ -87,6 +87,17 @@ function readFeedbackSubmission(interaction) {
   return { rating, title, message };
 }
 
+function buildThanksCard(entry) {
+  const ui = require('./features/ui');
+  return ui.notice({
+    accent: FEEDBACK_COLOR,
+    label: 'Feedback sent — thank you! 💛',
+    title: ui.esc(entry.title),
+    body: `**${stars(entry.rating)}**  ${entry.rating}/5\n\n${ui.softEsc(entry.message.length > 1000 ? `${entry.message.slice(0, 1000)}…` : entry.message)}`,
+    footer: 'Only you can see this · The developer reads every submission',
+  });
+}
+
 function buildThanksEmbed(entry) {
   return new EmbedBuilder()
     .setColor(FEEDBACK_COLOR)
@@ -103,4 +114,5 @@ module.exports = {
   buildFeedbackModal,
   readFeedbackSubmission,
   buildThanksEmbed,
+  buildThanksCard,
 };

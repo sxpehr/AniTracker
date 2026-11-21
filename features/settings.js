@@ -35,8 +35,8 @@ const CATEGORIES = {
   showcase: { label: 'Showcase', emoji: '🧩', description: 'Choose what your profile shows, and the layout' },
   activity: { label: 'Activity posts', emoji: '📡', description: 'How your watch updates look in servers' },
   privacy: { label: 'Privacy', emoji: '🔒', description: 'Who can see what' },
-  more: { label: 'Stats & reviews', emoji: '📊', description: 'Time zone, monthly recap, spoilers' },
-  server: { label: 'Server', emoji: '🛡️', description: 'Leaderboards for this server (managers)' },
+  more: { label: 'Stats & reviews', emoji: '📊', description: 'Time zone, recap DMs, spoilers, reminders' },
+  server: { label: 'Server', emoji: '🛡️', description: 'Now in /serversettings (admins)' },
 };
 
 const DRAFT_FIELDS = ['profile', 'activity', 'privacy', 'prefs'];
@@ -259,11 +259,19 @@ async function panelBlocks(userId, d, interaction) {
         social.TIMEZONES.map(([v, l]) => ({ label: l, value: v, default: pf.timezone === v }))
       )
     );
+    const recapOn = (pf.recapDmMode || 'on') !== 'off';
     blocks.push(ui.text(ui.label('Monthly recap')));
     blocks.push(
       ui.select('s:recap', 'Monthly recap…', [
-        { label: 'Don’t DM me', value: 'off', emoji: '🔕', description: 'Open it any time with /recap', default: !pf.recapDm },
-        { label: 'DM me my recap on the 1st', value: 'dm', emoji: '🎁', description: 'Your month in anime, delivered', default: Boolean(pf.recapDm) },
+        { label: 'DM me my recap on the 1st', value: 'dm', emoji: '🎁', description: 'Your month in anime, delivered (default)', default: recapOn },
+        { label: 'Don’t DM me', value: 'off', emoji: '🔕', description: 'Open it any time with /recap', default: !recapOn },
+      ])
+    );
+    blocks.push(ui.text(ui.label('Review & feedback reminders')));
+    blocks.push(
+      ui.select('s:nudge', 'Occasional Top.gg / feedback reminder…', [
+        { label: 'Now and then is fine', value: 'on', emoji: '💛', description: 'Rarely — at most every two weeks', default: !pf.nudge || pf.nudge === 'on' },
+        { label: 'Never remind me', value: 'off', emoji: '🔕', default: pf.nudge === 'off' || pf.nudge === 'done' },
       ])
     );
     blocks.push(ui.text(ui.label('Review spoilers')));
@@ -277,21 +285,14 @@ async function panelBlocks(userId, d, interaction) {
 
   if (cat === 'server') {
     const isManager = interaction?.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
-    if (!interaction?.guildId || !isManager) {
-      blocks.push(ui.text('-# Only people with **Manage Server** can change server settings.'));
-    } else {
-      const s = await ctx.loadSocial();
-      const enabled = statsUi.guildBoards(s, interaction.guildId);
-      blocks.push(ui.text('-# Server settings apply **immediately** (no Save needed). Turn off anything that feels too competitive.'));
-      blocks.push(
-        ui.select(
-          's:lb',
-          'Leaderboards shown in /leaderboard…',
-          Object.entries(statsUi.BOARDS).map(([k, v]) => ({ label: v.label, value: k, emoji: v.emoji, default: enabled.includes(k) })),
-          { min: 0, max: Object.keys(statsUi.BOARDS).length }
-        )
-      );
-    }
+    blocks.push(
+      ui.text(
+        isManager
+          ? '### 🛡️ Server settings moved\nEverything for this server — channel, recaps, leaderboards, who can track, 18+ posts and more — now lives in its own admin panel.'
+          : '-# Only people with **Manage Server** can change server settings.'
+      )
+    );
+    if (isManager && interaction?.guildId) blocks.push(ui.actionRow(ui.button('sv:open', 'Open server settings', { emoji: '🛡️', style: ui.ButtonStyle.Primary })));
   }
   return blocks;
 }
@@ -548,6 +549,7 @@ async function onComponent(interaction) {
       break;
     case 'show':
       d.data.activity.show = v.filter((x) => social.ACTIVITY_FIELDS[x]);
+      d.data.activity.v = 2; // knows about the newer fields (progress bar, status)
       changed(d);
       break;
     case 'auto': {
@@ -573,7 +575,11 @@ async function onComponent(interaction) {
       changed(d);
       break;
     case 'recap':
-      d.data.prefs.recapDm = v[0] === 'dm';
+      d.data.prefs.recapDmMode = v[0] === 'dm' ? 'on' : 'off';
+      changed(d);
+      break;
+    case 'nudge':
+      d.data.prefs.nudge = v[0] === 'on' ? 'on' : 'off';
       changed(d);
       break;
     case 'spoil':
@@ -625,10 +631,9 @@ async function onComponent(interaction) {
     case 'postpreview': {
       await interaction.deferReply({ flags: ui.EPHEMERAL }).catch(() => {});
       const u = await draftUser(me, d);
-      const embed = ctx.buildActivityPreview ? await ctx.buildActivityPreview(me, u) : null;
-      return interaction
-        .editReply(embed ? { content: '-# 📡 This is how your next activity post will look' + (d.dirty ? ' (unsaved changes included)' : ''), ...embed } : { content: 'Preview unavailable right now.' })
-        .catch((e) => console.error('Post preview failed:', e.message));
+      const post = ctx.buildActivityPreview ? await ctx.buildActivityPreview(me, u) : null;
+      if (post) post.components = [ui.text(`-# 📡 This is how your next activity post will look${d.dirty ? ' (unsaved changes included)' : ''}`), ...post.components];
+      return interaction.editReply(post || { content: 'Preview unavailable right now.' }).catch((e) => console.error('Post preview failed:', e.message));
     }
     default:
       return;

@@ -3,13 +3,18 @@
  *
  * The poller hands every new AniList list activity to record(). We keep, per
  * AniList user:
- *   days   { 'YYYY-MM-DD': [episodes, minutes] }   (~13 months, in their time zone)
- *   months { 'YYYY-MM': { e, m, s, c, g:{genre:eps}, a:{mediaId:eps}, w:[7] } }  (forever)
+ *   days   { 'YYYY-MM-DD': [episodes, minutes, completed, {mediaId:eps}] }
+ *          (~13 months, in their time zone; the per-show map is kept ~10 weeks
+ *          for weekly recaps)
+ *   months { 'YYYY-MM': { e, m, s, c, g:{genre:eps}, t:{tag:eps}, f, a:{mediaId:eps}, w:[7] } }  (forever)
+ *          t = specific AniList tags (Isekai, Satire…), f = "freaky" episodes
  *   media  { mediaId: { p: highest episode seen } }  ← prevents double counting
  *
  * Lifetime totals come straight from AniList (it already knows everything),
  * so nothing here duplicates what AniList stores.
  * ------------------------------------------------------------------------- */
+
+const { statTags, isFreaky } = require('./tags');
 
 const fmtCache = new Map();
 function dayKey(date, tz) {
@@ -57,18 +62,23 @@ function ensureUser(stats, anilistId) {
 }
 
 function ensureMonth(su, ym) {
-  if (!su.months[ym]) su.months[ym] = { e: 0, m: 0, s: 0, c: 0, g: {}, a: {}, w: [0, 0, 0, 0, 0, 0, 0] };
-  return su.months[ym];
+  if (!su.months[ym]) su.months[ym] = { e: 0, m: 0, s: 0, c: 0, g: {}, t: {}, f: 0, a: {}, w: [0, 0, 0, 0, 0, 0, 0] };
+  const m = su.months[ym];
+  m.t ||= {};
+  m.f ||= 0;
+  return m;
 }
 
-// Returns how many new activities were counted.
-function record(stats, anilistId, activities, tz) {
+// Returns how many new activities were counted. `extra` = merged/list
+// events from feed.js (already known to be new, so no id filter).
+function record(stats, anilistId, activities, tz, extra = []) {
   const su = ensureUser(stats, anilistId);
   const fresh = activities.filter((a) => a.id > (su.lastActivityId || 0)).sort((a, b) => a.id - b.id);
+  for (const act of fresh) su.lastActivityId = Math.max(su.lastActivityId || 0, act.id);
+  const all = [...fresh, ...(extra || [])].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   let counted = 0;
 
-  for (const act of fresh) {
-    su.lastActivityId = Math.max(su.lastActivityId || 0, act.id);
+  for (const act of all) {
     if (act.__typename !== 'ListActivity' || !act.media || act.media.type !== 'ANIME') continue;
     const media = act.media;
     const status = (act.status || '').toLowerCase();
@@ -106,16 +116,35 @@ function record(stats, anilistId, activities, tz) {
     const month = ensureMonth(su, monthKey(day));
 
     if (!stats.media[media.id]) stats.media[media.id] = {};
-    Object.assign(stats.media[media.id], {
+    const sm = stats.media[media.id];
+    Object.assign(sm, {
       t: media.title?.english || media.title?.romaji || 'Unknown',
-      c: media.coverImage?.large || media.coverImage?.medium || null,
+      c: media.coverImage?.extraLarge || media.coverImage?.large || media.coverImage?.medium || null,
       g: (media.genres || []).slice(0, 4),
       u: media.siteUrl,
     });
+    if (media.bannerImage) sm.b = media.bannerImage;
+    if (media.episodes) sm.n = media.episodes;
+    if (Array.isArray(media.tags)) {
+      sm.tg = statTags(media.tags, media.genres);
+      sm.fr = isFreaky(media.tags, media.genres) ? 1 : 0;
+    }
+    const tagsForStats = sm.tg || [];
+    const freaky = sm.fr ?? (isFreaky(null, media.genres) ? 1 : 0);
+
+    const d = su.days[day] || [0, 0, 0, {}];
+    if (d.length < 4) d.push(...[0, 0, 0, {}].slice(d.length));
+    if (completed) d[2] = (d[2] || 0) + 1;
+    if (eps > 0) {
+      d[0] += eps;
+      d[1] += minutes;
+      d[3] = d[3] || {};
+      d[3][media.id] = (d[3][media.id] || 0) + eps;
+    }
+    if (eps > 0 || completed) su.days[day] = d;
 
     if (eps > 0) {
-      const wasActive = Boolean(su.days[day]?.[0]);
-      su.days[day] = [(su.days[day]?.[0] || 0) + eps, (su.days[day]?.[1] || 0) + minutes];
+      const wasActive = d[0] - eps > 0;
       if (!wasActive) su.activeDays = (su.activeDays || 0) + 1;
       if (!su.lastDay || day > su.lastDay) su.lastDay = day;
       month.e += eps;
@@ -123,6 +152,8 @@ function record(stats, anilistId, activities, tz) {
       month.w[weekday(day)] += eps;
       month.a[media.id] = (month.a[media.id] || 0) + eps;
       for (const g of media.genres || []) month.g[g] = (month.g[g] || 0) + eps;
+      for (const t of tagsForStats) month.t[t] = (month.t[t] || 0) + eps;
+      if (freaky) month.f += eps;
     }
     month.s += started;
     month.c += completed;
@@ -193,8 +224,14 @@ function monthSummary(stats, su, ym) {
     .map(([genre, eps]) => ({ genre, eps }));
   const days = Object.keys(su.days || {}).filter((d) => d.startsWith(ym) && su.days[d][0]).length;
   const wd = m.w.indexOf(Math.max(...m.w));
+  // Specific tags (Isekai, Satire…) when we have them; genres for older months.
+  const topTags = Object.entries(m.t || {})
+    .sort((a, b) => b[1] - a[1])
+    .map(([genre, eps]) => ({ genre, eps }));
   return {
     month: ym,
+    topTags: topTags.length ? topTags : topGenres,
+    freaky: m.f || 0,
     episodes: m.e,
     minutes: m.m,
     started: m.s,
@@ -206,6 +243,47 @@ function monthSummary(stats, su, ym) {
     busiestWeekday: Math.max(...m.w) > 0 ? ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][wd] : null,
     longestStreak: longestInMonth(su, ym),
   };
+}
+
+// Any date range (inclusive, 'YYYY-MM-DD'), e.g. a week for weekly recaps.
+function rangeSummary(stats, su, fromDay, toDay) {
+  const out = { episodes: 0, minutes: 0, completed: 0, activeDays: 0, longestStreak: 0, anime: {}, topAnime: [], topTags: [], freaky: 0 };
+  if (!su?.days) return out;
+  let run = 0;
+  let prev = null;
+  for (const d of Object.keys(su.days).filter((k) => k >= fromDay && k <= toDay).sort()) {
+    const [e = 0, m = 0, c = 0, a = {}] = su.days[d];
+    out.episodes += e;
+    out.minutes += m;
+    out.completed += c || 0;
+    for (const [id, n] of Object.entries(a || {})) out.anime[id] = (out.anime[id] || 0) + n;
+    if (e) {
+      out.activeDays++;
+      run = prev && addDays(prev, 1) === d ? run + 1 : 1;
+      out.longestStreak = Math.max(out.longestStreak, run);
+      prev = d;
+    }
+  }
+  out.topAnime = Object.entries(out.anime)
+    .sort((x, y) => y[1] - x[1])
+    .map(([id, eps]) => ({ mediaId: Number(id), eps, ...(stats.media[id] || {}) }));
+  const tags = {};
+  for (const a of out.topAnime) {
+    for (const t of a.tg || a.g || []) tags[t] = (tags[t] || 0) + a.eps;
+    if (a.fr) out.freaky += a.eps;
+  }
+  out.topTags = Object.entries(tags)
+    .sort((x, y) => y[1] - x[1])
+    .map(([genre, eps]) => ({ genre, eps }));
+  out.animeCount = out.topAnime.length;
+  return out;
+}
+
+// Monday..Sunday of the week before the one containing `day`.
+function previousWeek(day) {
+  const dow = (weekday(day) + 6) % 7; // 0 = Monday
+  const thisMonday = addDays(day, -dow);
+  return { from: addDays(thisMonday, -7), to: addDays(thisMonday, -1), key: addDays(thisMonday, -7) };
 }
 
 function lastMonths(fromYm, n) {
@@ -241,4 +319,7 @@ module.exports = {
   monthName,
   monthBounds,
   ensureUser,
+  rangeSummary,
+  previousWeek,
+  weekday,
 };

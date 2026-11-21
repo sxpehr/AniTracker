@@ -234,6 +234,26 @@ const optional = (component, { priority = 5, group = false, unit = null } = {}) 
   return { optional: true, component, priority, group, unit };
 };
 
+// A small, consistent card for confirmations, DMs and simple screens:
+//   -# LABEL
+//   ### Title                              [thumbnail]
+//   body
+//   [buttons]
+//   -# footer
+function notice({ accent = ANILIST_BLUE, label: lbl, title, body, thumbnail, buttons = [], footer, banner, extra = [] } = {}) {
+  const head = [lbl ? `-# ${String(lbl).toUpperCase()}` : null, title ? `### ${title}` : null].filter(Boolean).join('\n');
+  const children = [];
+  if (banner && isHttpUrl(banner)) children.push(gallery([{ url: banner }]));
+  const lines = [head, body].filter(Boolean);
+  if (thumbnail && isHttpUrl(thumbnail) && lines.length) children.push(section(lines.slice(0, 3), thumbnail));
+  else if (lines.length) children.push(text(lines.join('\n')));
+  children.push(...extra.filter(Boolean));
+  const row = actionRow(buttons);
+  if (row) children.push(row);
+  if (footer) children.push(text(`-# ${footer}`));
+  return fit([card(accent, children)]);
+}
+
 /* ------------------------------ typography ------------------------------ */
 
 const label = (s) => `-# ${s.toUpperCase()}`; // small caps-style section label
@@ -314,6 +334,7 @@ module.exports = {
   select,
   card,
   fit,
+  notice,
   optional,
   label,
   num,

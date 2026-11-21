@@ -53,8 +53,10 @@ function b64url(buf) {
   return Buffer.from(buf).toString('base64url');
 }
 
-function signState(discordUserId) {
-  const payload = b64url(JSON.stringify({ u: discordUserId, e: Date.now() + STATE_TTL_MS, n: crypto.randomBytes(6).toString('hex') }));
+function signState(discordUserId, guildId) {
+  const body = { u: discordUserId, e: Date.now() + STATE_TTL_MS, n: crypto.randomBytes(6).toString('hex') };
+  if (guildId) body.g = String(guildId); // the server they signed in from (auto-track there)
+  const payload = b64url(JSON.stringify(body));
   const sig = crypto.createHmac('sha256', stateSecret()).update(payload).digest('base64url');
   return `${payload}.${sig}`;
 }
@@ -69,17 +71,17 @@ function verifyState(state) {
   try {
     const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
     if (!parsed.u || Date.now() > parsed.e) return null;
-    return parsed.u;
+    return { userId: parsed.u, guildId: parsed.g || null };
   } catch {
     return null;
   }
 }
 
-function signInUrlFor(discordUserId) {
+function signInUrlFor(discordUserId, guildId = null) {
   return buildAuthorizeUrl({
     clientId: process.env.ANILIST_CLIENT_ID,
     redirectUri: redirectUri(),
-    state: signState(discordUserId),
+    state: signState(discordUserId, guildId),
   });
 }
 
@@ -129,7 +131,9 @@ function buildOAuthRouter(deps) {
       return send(500, { ok: false, title: 'Sign-in not set up', message: 'The bot owner hasn’t finished configuring AniList sign-in yet.' });
     }
 
-    const discordUserId = verifyState(state);
+    const verified = verifyState(state);
+    const discordUserId = verified?.userId;
+    const fromGuildId = verified?.guildId || null;
     if (!discordUserId) {
       return send(400, { ok: false, title: 'Link expired', message: 'That sign-in link is expired or invalid. Run <b>/signin</b> in Discord to get a fresh one.' });
     }
@@ -158,11 +162,12 @@ function buildOAuthRouter(deps) {
         avatar: viewer.avatar?.medium || null,
         siteUrl: viewer.siteUrl,
         linkedAt: new Date().toISOString(),
+        guildId: fromGuildId,
       };
       data.linkedAccounts[discordUserId] = account;
       await saveData(data);
 
-      if (onLinked) onLinked(discordUserId, account).catch(() => {});
+      if (onLinked) Promise.resolve(onLinked(discordUserId, account, fromGuildId)).catch(() => {});
 
       return send(200, {
         ok: true,

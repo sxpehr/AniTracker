@@ -91,6 +91,41 @@ const commands = [
               ...['Action', 'Adventure', 'Comedy', 'Drama', 'Fantasy', 'Horror', 'Mecha', 'Music', 'Mystery', 'Psychological', 'Romance', 'Sci-Fi', 'Slice of Life', 'Sports', 'Supernatural', 'Thriller'].map((g) => ({ name: g, value: g }))
             )
         )
+        .addStringOption((o) =>
+          o
+            .setName('vibe')
+            .setDescription('Something more specific (AniList tags)')
+            .setRequired(false)
+            .addChoices(
+              ...[
+                'Isekai',
+                'Satire',
+                'Iyashikei',
+                'Reincarnation',
+                'Time Manipulation',
+                'Revenge',
+                'Survival',
+                'Coming of Age',
+                'Found Family',
+                'Cyberpunk',
+                'Post-Apocalyptic',
+                'Dystopian',
+                'Martial Arts',
+                'Super Power',
+                'Military',
+                'Detective',
+                'Vampire',
+                'Tragedy',
+                'Workplace',
+                'Space',
+                'Gambling',
+                'Cute Girls Doing Cute Things',
+                'Gore',
+                'Parody',
+                'Villainess',
+              ].map((t) => ({ name: t, value: t }))
+            )
+        )
         .addBooleanOption((o) => o.setName('share').setDescription('Post it in the channel').setRequired(false))
     )
     .addSubcommand((sc) => sc.setName('airing').setDescription('When the next episodes of your rotation air')),
@@ -209,6 +244,7 @@ const commands = [
         { name: '❤️ Most helpful reviewers', value: 'helpful' }
       )
   ),
+  base('serversettings', 'Admin panel: channel, recaps, leaderboards, auto-tracking and more').setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   base('feedback', 'Rate AniTracker and send feedback to the developer'),
   base('help', 'All AniTracker commands and buttons'),
 ].map((c) => c.toJSON());

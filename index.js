@@ -30,6 +30,8 @@ const {
 const {
   getUserByName,
   getRecentActivities,
+  getRecentFeed,
+  getMediaTags,
   getMediaById,
   getUserFavorites,
   getMediaRelations,
@@ -57,6 +59,12 @@ const statsUi = require('./features/statsUi');
 const picker = require('./features/picker');
 const animeFeature = require('./features/anime');
 const { snapshot: mediaSnapshot } = require('./features/anilistSocial');
+const feed = require('./features/feed');
+const activityPost = require('./features/activityPost');
+const { guildConfig, peekConfig } = require('./features/guildConfig');
+const recaps = require('./features/recaps');
+const nudge = require('./features/nudge');
+const serverSettings = require('./features/serverSettings');
 
 const POLL_INTERVAL_MS = (parseInt(process.env.POLL_MINUTES, 10) || 3) * 60 * 1000;
 const ANIME_ROLE_NAME = 'anime'; // server role (case-insensitive) pinged on relaunch
@@ -104,6 +112,9 @@ const franchiseCache = new Map(); // rootId -> [tv-ish media ids in order]
 const mediaDetailsCache = new Map(); // mediaId -> { at, media }
 const reactionDmSeen = new Map(); // `${msg}:${user}:${emoji}` -> timestamp
 const warnedChannels = new Set();
+// Last poll result per AniList account — shown by the server health check.
+const feedHealth = new Map(); // anilistId -> { at, ok, error, latestId, latestAt, entries }
+let pollRotation = 0;
 
 // Polling can be paused from the dashboard. Backed by data.botPaused.
 let isPaused = false;
@@ -149,8 +160,12 @@ setupFeatures({
   setLiveActivity: (data, account, on, by) => setLiveActivity(data, account, on, by),
   applyRecommendVote: (...args) => applyRecommendVote(...args),
   buildActivityPreview: (...args) => buildActivityPreview(...args),
-  buildMoreInfoPayload: (id) => buildMoreInfoPayload(id),
+  buildMoreInfoPayload: (id, extra) => buildMoreInfoPayload(id, extra),
   toggleList: (interaction, mediaId, field) => handleListToggleButton(interaction, mediaId, field),
+  feedHealth,
+  missingChannelPerms: (channel) => missingChannelPerms(channel),
+  trackInGuild: (...args) => trackInGuild(...args),
+  getInviteUrl: () => getInviteUrl(),
 });
 
 client.on(Events.Error, (err) => console.error('[discord client error]', err.message));
@@ -200,7 +215,7 @@ app.use(
     loadSocial,
   })
 );
-app.use(buildOAuthRouter({ loadData, saveData, onLinked: sendLinkedConfirmation }));
+app.use(buildOAuthRouter({ loadData, saveData, onLinked: (id, account, guildId) => sendLinkedConfirmation(id, account, guildId) }));
 app.use(buildBannerRouter()); // generated profile banners (fetched + cached by Discord)
 
 // Last-resort Express error handler — a thrown route must never crash the process.
@@ -404,11 +419,6 @@ function titleOf(media) {
   return media?.title?.english || media?.title?.romaji || 'Unknown title';
 }
 
-function signInButtonRow(userId) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel('Sign in with AniList').setEmoji('🔐').setURL(signInUrlFor(userId))
-  );
-}
 
 async function findAnimeRole(guild) {
   try {
@@ -431,15 +441,18 @@ async function notifyRelaunch() {
   data.lastRelaunchNoticeAt = Date.now();
   saveData(data);
 
+  const soc = await loadSocial();
   for (const guildId of Object.keys(data.guilds)) {
     const guildData = ensureGuildData(data, guildId);
     if (!guildData.channelId) continue;
+    const cfg = peekConfig(soc, guildId);
+    if (!cfg.relaunchPing) continue;
     try {
       const guild = client.guilds.cache.get(guildId);
       if (!guild) continue;
       const channel = await client.channels.fetch(guildData.channelId).catch(() => null);
       if (!channel || missingChannelPerms(channel).length) continue;
-      const animeRole = await findAnimeRole(guild);
+      const animeRole = cfg.animeRoleId ? await guild.roles.fetch(cfg.animeRoleId).catch(() => null) : await findAnimeRole(guild);
       if (!animeRole) continue;
       await channel.send({
         content: `<@&${animeRole.id}> 🔄 AniTracker just restarted. If your activity feed looks stale, re-run \`/track\` for your profile.`,
@@ -459,22 +472,22 @@ client.on(Events.GuildCreate, async (guild) => {
     console.log(`Joined server: ${guild.name} (${guild.id})`);
     const channel = guild.systemChannel;
     if (!channel || missingChannelPerms(channel).length) return;
-    const embed = new EmbedBuilder()
-      .setColor(DEFAULT_COLOR)
-      .setTitle('✦ Thanks for adding AniTracker!')
-      .setDescription(
-        [
-          'I post AniList activity (episodes watched, chapters read, status changes) right here in Discord.',
-          '',
-          '**Quick start**',
-          '`/setchannel` — pick where updates go (needs Manage Server)',
-          '`/track username:<AniList name>` — start posting someone’s activity',
-          '`/signin` — link your own AniList so you control your live activity',
-          '`/profile` · `/settings` — your own customizable anime profile',
-          '`/help` — everything else',
-        ].join('\n')
-      );
-    await channel.send({ embeds: [embed] });
+    const payload = ui.notice({
+      label: '✦ AniTracker',
+      title: 'Thanks for adding AniTracker!',
+      thumbnail: client.user.displayAvatarURL({ size: 256, extension: 'png' }),
+      body: [
+        'I post AniList activity — episodes watched, chapters read, status changes — right here, plus weekly & monthly server recaps.',
+        '',
+        '**Quick start**',
+        '`/serversettings` — admins: pick the channel, recaps, leaderboards and more',
+        '`/track username:<AniList name>` — start posting someone’s activity',
+        '`/signin` — link your own AniList (you’ll be tracked here automatically)',
+        '`/profile` · `/settings` — your own customizable anime profile',
+        '`/help` — everything else',
+      ].join('\n'),
+    });
+    await channel.send(payload);
   } catch (e) {
     console.error('Failed to send welcome message:', e.message);
   }
@@ -488,13 +501,19 @@ client.on(Events.InteractionCreate, (interaction) => dispatchInteraction(interac
 async function dispatchInteraction(interaction) {
   try {
     if (interaction.isAutocomplete()) return await socialCommands.autocomplete(interaction);
-    if (interaction.isChatInputCommand()) return await handleSlashCommand(interaction);
+    if (interaction.isChatInputCommand()) {
+      await handleSlashCommand(interaction);
+      return await nudge.maybeNudge(interaction);
+    }
     // Profile / settings / collections / reviews / stats components use "ns:..." ids.
     if ((interaction.isButton() || interaction.isAnySelectMenu() || interaction.isModalSubmit()) && interaction.customId.includes(':')) {
       return await routeFeatureInteraction(interaction);
     }
-    if (interaction.isButton()) await handleButton(interaction);
-    else if (interaction.isStringSelectMenu()) await handleSelectMenu(interaction);
+    if (interaction.isButton()) {
+      await handleButton(interaction);
+      return await nudge.maybeNudge(interaction);
+    }
+    if (interaction.isStringSelectMenu()) await handleSelectMenu(interaction);
     else if (interaction.isModalSubmit()) await handleModalSubmit(interaction);
   } catch (err) {
     console.error('Unhandled error in interaction handler:', err);
@@ -514,9 +533,16 @@ async function routeFeatureInteraction(interaction) {
     if (ns === 'c') return collectionsFeature.onModal(interaction);
     if (ns === 'rv') return reviewsFeature.onModal(interaction);
     if (ns === 'q') return picker.onModal(interaction);
+    if (ns === 'sv') return serverSettings.onModal(interaction);
     return;
   }
   switch (ns) {
+    case 'nudge':
+      return nudge.onComponent(interaction);
+    case 'sv':
+      return serverSettings.onComponent(interaction);
+    case 'rx':
+      return recaps.onComponent(interaction);
     case 'p':
       return profileFeature.onComponent(interaction);
     case 's':
@@ -573,43 +599,25 @@ client.on(Events.MessageReactionAdd, async (reaction, reactingUser) => {
     reactionDmSeen.set(dedupeKey, now);
     if (reactionDmSeen.size > 2000) reactionDmSeen.delete(reactionDmSeen.keys().next().value);
 
-    const sourceEmbed = message.embeds[0];
-    const cover = postInfo.cover || sourceEmbed?.image?.url || null;
+    const cover = postInfo.cover || message.embeds[0]?.image?.url || null;
     const animeTitle = postInfo.animeTitle || 'your activity';
-    const animeUrl = postInfo.siteUrl || null;
-    const titleLink = animeUrl ? `[${animeTitle}](${animeUrl})` : `**${animeTitle}**`;
-    const color = sourceEmbed?.color ?? DEFAULT_COLOR;
-    const guildIcon = message.guild.iconURL({ size: 64 }) || undefined;
-    const jumpRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel('Jump to post').setEmoji('↗️').setURL(message.url)
-    );
+    const titleLink = postInfo.siteUrl ? `[${ui.esc(animeTitle)}](${postInfo.siteUrl})` : `**${ui.esc(animeTitle)}**`;
+    const color = postInfo.color ?? message.embeds[0]?.color ?? DEFAULT_COLOR;
+    const where = `-# 🏠 ${ui.esc(message.guild.name)} · <#${message.channelId}> · ${ui.relTime(Date.now())}`;
+    const jump = ui.linkButton(message.url, 'Jump to post', '↗️');
+    const who = reactingUser.displayName || reactingUser.username;
 
     const owner = await client.users.fetch(ownerId).catch(() => null);
-
     // DM to the profile owner: who reacted, to what, and where.
     if (owner) {
-      const embed = new EmbedBuilder()
-        .setColor(color)
-        .setAuthor({ name: `${reactingUser.displayName || reactingUser.username} reacted ${emojiStr}`, iconURL: reactingUser.displayAvatarURL({ size: 64 }) })
-        .setDescription(`<@${reactingUser.id}> reacted ${emojiStr} to you watching ${titleLink}\n\n🏠 **${message.guild.name}** · <#${message.channelId}>`)
-        .setFooter({ text: message.guild.name, iconURL: guildIcon })
-        .setTimestamp(new Date());
-      if (cover) embed.setThumbnail(cover);
-      await owner.send({ embeds: [embed], components: [jumpRow], allowedMentions: { parse: [] } }).catch((e) =>
-        console.error(`Failed to DM profile owner ${ownerId}:`, e.message)
-      );
+      await owner
+        .send(ui.notice({ accent: color, label: `${emojiStr} new reaction`, title: `${ui.esc(who)} reacted ${emojiStr}`, body: `<@${reactingUser.id}> reacted to you watching ${titleLink}\n${where}`, thumbnail: cover, buttons: [jump] }))
+        .catch((e) => console.error(`Failed to DM profile owner ${ownerId}:`, e.message));
     }
-
     // DM to the reactor: private confirmation the alert went out.
-    const confirm = new EmbedBuilder()
-      .setColor(color)
-      .setDescription(`✅ <@${ownerId}> was alerted of your ${emojiStr} on ${titleLink}\n\n🏠 **${message.guild.name}** · <#${message.channelId}>`)
-      .setFooter({ text: message.guild.name, iconURL: guildIcon })
-      .setTimestamp(new Date());
-    if (cover) confirm.setThumbnail(cover);
-    await reactingUser.send({ embeds: [confirm], components: [jumpRow], allowedMentions: { parse: [] } }).catch((e) =>
-      console.error(`Failed to DM reactor ${reactingUser.id}:`, e.message)
-    );
+    await reactingUser
+      .send(ui.notice({ accent: color, label: 'sent', title: `✅ Alert sent`, body: `<@${ownerId}> was told about your ${emojiStr} on ${titleLink}\n${where}`, thumbnail: cover, buttons: [jump] }))
+      .catch((e) => console.error(`Failed to DM reactor ${reactingUser.id}:`, e.message));
   } catch (e) {
     console.error('Error handling reaction notification:', e.message);
   }
@@ -631,6 +639,19 @@ async function handleSlashCommand(interaction) {
     await handleFeedbackCommand(interaction);
     return;
   }
+
+  // Remember which servers each person uses AniTracker in (server leaderboards,
+  // "share my recap to a server"). Cheap: in-memory, batched save.
+  loadSocial()
+    .then((s) => {
+      const u = social.getUser(s, interaction.user.id);
+      const before = u.guilds.length;
+      social.markGuild(u, interaction.guildId);
+      if (u.guilds.length !== before) saveSocial();
+    })
+    .catch(() => {});
+
+  if (commandName === 'serversettings') return serverSettings.handleCommand(interaction);
 
   // Profiles, settings, collections, reviews, stats, recaps, leaderboards.
   if (socialCommands.HANDLED.has(commandName)) {
@@ -683,6 +704,18 @@ async function handleSlashCommand(interaction) {
 
 async function handleTrack(interaction, data, guildData) {
   const username = interaction.options.getString('username').trim();
+  const soc = await loadSocial();
+  const cfg = peekConfig(soc, interaction.guildId);
+  const isManager = interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
+  const ownLinked = data.linkedAccounts[interaction.user.id];
+  const tracksSelf = ownLinked && ownLinked.anilistName?.toLowerCase() === username.toLowerCase();
+  if (cfg.trackPerm === 'managers' && !isManager && !tracksSelf) {
+    await respond(interaction, {
+      ...ui.notice({ accent: 0xfb7185, label: 'Server setting', title: '🔒 Only managers can track profiles here', body: 'This server’s admins limited `/track` to people with **Manage Server**. You can still track **yourself**: `/signin`, then `/track` your own AniList name.' }),
+      flags: ui.V2 | EPHEMERAL,
+    });
+    return;
+  }
   if (!(await safeDefer(interaction, false))) return;
 
   const existing = guildData.users.find((u) => u.username.toLowerCase() === username.toLowerCase());
@@ -776,13 +809,8 @@ async function handleList(interaction, data, guildData) {
     return;
   }
   const lines = guildData.users.map((u) => trackedLine(data, u, u.addedBy ? `<@${u.addedBy}>` : null));
-  const embed = new EmbedBuilder()
-    .setColor(DEFAULT_COLOR)
-    .setTitle(`📋 Tracked profiles (${guildData.users.length})`)
-    .setDescription(`${guildData.channelId ? `Posting in <#${guildData.channelId}>\n\n` : ''}${lines.join('\n')}`.slice(0, 4096))
-    .setFooter({ text: '⏸️ = owner turned live activity off' });
   // Mentions render as names but never ping.
-  await respond(interaction, { embeds: [embed], allowedMentions: { parse: [] } });
+  await respond(interaction, trackedCard(`📋 Tracked profiles · ${guildData.users.length}`, guildData, lines));
 }
 
 // Same info as /list, but with plain display names (no mentions at all).
@@ -802,11 +830,27 @@ async function handleWhosTracking(interaction, data, guildData) {
       return trackedLine(data, u, `tracked by ${trackerName}`);
     })
   );
-  const embed = new EmbedBuilder()
-    .setColor(DEFAULT_COLOR)
-    .setTitle("📋 Who's tracking what")
-    .setDescription(lines.join('\n').slice(0, 4096));
-  await respond(interaction, { embeds: [embed], allowedMentions: { parse: [] } });
+  await respond(interaction, trackedCard('📋 Who’s tracking what', guildData, lines));
+}
+
+function trackedCard(title, guildData, lines) {
+  const chunks = [];
+  let cur = '';
+  for (const l of lines) {
+    if ((cur + l).length > 1800) {
+      chunks.push(cur);
+      cur = '';
+    }
+    cur += `${l}\n`;
+  }
+  if (cur) chunks.push(cur);
+  const children = [
+    ui.text(`### ${title}\n-# ${guildData.channelId ? `Posting in <#${guildData.channelId}>` : 'No channel picked yet — `/serversettings`'}  ·  ⏸️ = owner turned live activity off`),
+    ui.divider(),
+    ...chunks.slice(0, 2).map((c) => ui.text(c.trim())),
+  ];
+  if (chunks.length > 2) children.push(ui.text(`-# …and ${lines.length - chunks.slice(0, 2).join('').split('\n').filter(Boolean).length} more`));
+  return ui.fit([ui.card(ui.ANILIST_BLUE, children)]);
 }
 
 async function handleSetChannel(interaction, data, guildData) {
@@ -843,39 +887,38 @@ function buildRecommendEntries(recsObj) {
     .slice(0, 10);
 }
 
-function buildRecommendEmbed(scope, guildData, data) {
+function buildRecommendPayload(scope, guildData, data) {
   const isGlobal = scope === 'global';
   const entries = buildRecommendEntries(isGlobal ? data.globalRecommendations : guildData.recommendations);
-  const scopeLabel = isGlobal ? '🌍 Global' : '🏠 This Server';
-
-  const embed = new EmbedBuilder()
-    .setColor(RECOMMEND_EMBED_COLOR)
-    .setTitle('⭐ Most Recommended Anime')
-    .setFooter({ text: `Showing: ${scopeLabel} — use the menu below to switch` })
-    .setTimestamp(new Date());
+  const scopeLabel = isGlobal ? '🌍 Global' : '🏠 This server';
+  const children = [ui.text(`-# ✦ ANITRACKER · ${isGlobal ? 'EVERY SERVER' : 'THIS SERVER'}\n## ⭐ Most recommended anime`)];
 
   if (!entries.length) {
-    embed.setDescription(
-      isGlobal
-        ? 'No recommendations anywhere yet — click ⭐ **Recommend** on an activity to start the leaderboard!'
-        : 'No recommendations in this server yet — click ⭐ **Recommend** on an activity to start the leaderboard!'
-    );
-    return embed;
-  }
-
-  const medals = ['🥇', '🥈', '🥉'];
-  const totalVotes = entries.reduce((sum, e) => sum + e.count, 0);
-  embed.setDescription(
-    `**${scopeLabel}**  •  ${totalVotes} total ${totalVotes === 1 ? 'vote' : 'votes'} across ${entries.length} title${entries.length === 1 ? '' : 's'}`
-  );
-  entries.forEach((e, i) => {
-    embed.addFields({
-      name: `${medals[i] || `#${i + 1}`}  ${e.title}`.slice(0, 256),
-      value: `[View on AniList ↗](${e.siteUrl})\n**${e.count}** ${e.count === 1 ? 'vote' : 'votes'}`,
-      inline: entries.length > 3,
+    children.push(ui.text(`*No recommendations ${isGlobal ? 'anywhere' : 'in this server'} yet — use \`/recommend\` to start the board!*`));
+  } else {
+    const totalVotes = entries.reduce((sum, e) => sum + e.count, 0);
+    children.push(ui.text(`-# ${scopeLabel} · ${totalVotes} ${totalVotes === 1 ? 'vote' : 'votes'} across ${entries.length} title${entries.length === 1 ? '' : 's'} · one vote per person`));
+    children.push(ui.divider());
+    const medals = ['🥇', '🥈', '🥉'];
+    const max = entries[0].count;
+    entries.slice(0, 3).forEach((e, i) => {
+      const cover = data.watchStats?.[e.mediaId]?.cover || null;
+      children.push(ui.row([`${medals[i]} **[${ui.esc(ui.clip(e.title, 70))}](${e.siteUrl})**`, `\`${ui.bar(e.count, max, 12)}\`  **${e.count}** ${e.count === 1 ? 'vote' : 'votes'}`], cover));
     });
-  });
-  return embed;
+    if (entries.length > 3) {
+      children.push(
+        ui.text(
+          entries
+            .slice(3)
+            .map((e, i) => `\`#${i + 4}\` [${ui.esc(ui.clip(e.title, 60))}](${e.siteUrl}) · **${e.count}**`)
+            .join('\n')
+        )
+      );
+    }
+  }
+  children.push(ui.divider());
+  children.push(buildRecommendScopeRow(scope));
+  return ui.fit([ui.card(RECOMMEND_EMBED_COLOR, children)]);
 }
 
 function buildRecommendScopeRow(scope) {
@@ -890,8 +933,7 @@ function buildRecommendScopeRow(scope) {
 }
 
 async function handleRecommendAnimes(interaction, guildData, data) {
-  const scope = 'guild';
-  await respond(interaction, { embeds: [buildRecommendEmbed(scope, guildData, data)], components: [buildRecommendScopeRow(scope)] });
+  await respond(interaction, buildRecommendPayload('guild', guildData, data));
 }
 
 async function handleSelectMenu(interaction) {
@@ -899,17 +941,19 @@ async function handleSelectMenu(interaction) {
   const data = await loadData();
   const guildData = ensureGuildData(data, interaction.guildId);
   const scope = interaction.values[0] === 'global' ? 'global' : 'guild';
-  const payload = { embeds: [buildRecommendEmbed(scope, guildData, data)], components: [buildRecommendScopeRow(scope)] };
+  const payload = buildRecommendPayload(scope, guildData, data);
 
   // Only the person who ran the command switches the shared message; anyone
   // else gets their own private copy instead of changing it for everybody.
   const ownerId = interaction.message.interactionMetadata?.user?.id;
   if (ownerId && ownerId !== interaction.user.id) {
-    await respond(interaction, { ...payload, flags: EPHEMERAL });
+    await respond(interaction, { ...payload, flags: ui.V2 | EPHEMERAL });
     return;
   }
   try {
-    await interaction.update(payload);
+    // An old classic-embed board can't switch layouts in place: reply fresh.
+    if (!interaction.message.flags?.has?.(MessageFlags.IsComponentsV2)) await interaction.reply({ ...payload, flags: ui.V2 | EPHEMERAL });
+    else await interaction.update(payload);
   } catch (e) {
     console.error('Failed to update recommend scope:', e.message);
   }
@@ -937,20 +981,23 @@ async function handleFavorites(interaction) {
     await respond(interaction, { content: `**${user.name}** hasn't favourited anything on AniList yet.`, allowedMentions: { parse: [] } });
     return;
   }
-
-  const embed = new EmbedBuilder().setColor(DEFAULT_COLOR).setTitle(`💖 ${user.name}'s Favourites`).setURL(user.siteUrl);
-  if (user.avatar?.medium) embed.setThumbnail(user.avatar.medium);
-  const fmt = (list) =>
-    list
-      .map((m, i) => `\`${i + 1}\` [${titleOf(m)}](${m.siteUrl})`)
-      .join('\n')
-      .slice(0, 1024);
-  if (animeList.length) embed.addFields({ name: '📺 Anime', value: fmt(animeList), inline: mangaList.length > 0 });
-  if (mangaList.length) embed.addFields({ name: '📖 Manga', value: fmt(mangaList), inline: animeList.length > 0 });
-  await respond(interaction, { embeds: [embed] });
+  const fmt = (list) => list.map((m, i) => `\`${String(i + 1).padStart(2, '0')}\` [${ui.esc(ui.clip(titleOf(m), 60))}](${m.siteUrl})`).join('\n');
+  const children = [ui.row([`-# ANILIST FAVOURITES`, `## [${ui.esc(user.name)}](${user.siteUrl})`, `-# ${animeList.length} anime · ${mangaList.length} manga`], user.avatar?.medium)];
+  const covers = ui.coverGallery(animeList.slice(0, 5).map((m) => ({ url: m.coverImage?.large, description: titleOf(m) })));
+  if (covers) children.push(covers);
+  if (animeList.length) children.push(ui.text(`${ui.label('📺 Anime')}\n${fmt(animeList)}`));
+  if (mangaList.length) children.push(ui.text(`${ui.label('📖 Manga')}\n${fmt(mangaList)}`));
+  await respond(interaction, ui.fit([ui.card(DEFAULT_COLOR, children)]));
 }
 
 /* ----- /signin, /signout ----- */
+function trackHereButton(data, guildId, anilistId) {
+  if (!guildId) return null;
+  const g = data.guilds[guildId];
+  if (!g?.channelId || (g.users || []).some((u) => u.id === anilistId)) return null;
+  return ui.button('trk_here', 'Post my activity in this server', { emoji: '📡', style: ButtonStyle.Success });
+}
+
 async function handleSignIn(interaction, data) {
   if (!isOAuthConfigured()) {
     await respond(interaction, {
@@ -960,29 +1007,34 @@ async function handleSignIn(interaction, data) {
     return;
   }
   const linked = data.linkedAccounts[interaction.user.id];
-  const embed = new EmbedBuilder().setColor(DEFAULT_COLOR);
+  const signIn = ui.linkButton(signInUrlFor(interaction.user.id, interaction.guildId), linked ? 'Switch account' : 'Sign in with AniList', '🔐');
+  let payload;
   if (linked) {
-    embed
-      .setTitle('🔐 You’re signed in')
-      .setDescription(
-        `Linked to **[${linked.anilistName}](${linked.siteUrl})**.\n\nWant to switch accounts? Sign in again below with the other AniList account. Or use \`/signout\` to unlink.`
-      );
-    if (linked.avatar) embed.setThumbnail(linked.avatar);
+    payload = ui.notice({
+      label: 'AniList account',
+      title: `🔐 You’re signed in as [${ui.esc(linked.anilistName)}](${linked.siteUrl})`,
+      body: 'Want a different account? Sign in again with it below — or use `/signout` to unlink.',
+      thumbnail: linked.avatar,
+      buttons: [signIn, trackHereButton(data, interaction.guildId, linked.anilistId)],
+      footer: 'Only you can see this',
+    });
   } else {
-    embed
-      .setTitle('🔐 Sign in with AniList')
-      .setDescription(
-        [
-          'Linking proves which AniList profile is yours, so **only you** can control it — like turning your live activity on/off with `/tracking`.',
-          '',
-          '• AniTracker only reads your **username and avatar**',
-          '• It never posts, edits, or changes anything on your AniList',
-          '• The link below is personal and expires in 15 minutes — don’t share it',
-        ].join('\n')
-      );
+    payload = ui.notice({
+      label: 'AniList account',
+      title: '🔐 Sign in with AniList',
+      body: [
+        'Linking proves which AniList profile is yours, so **only you** control it — like turning your live activity on/off with `/tracking`.',
+        '',
+        '• AniTracker only reads your **username and avatar**',
+        '• It never posts, edits or changes anything on your AniList',
+        '• You’ll be tracked in this server automatically (if its admins allow it)',
+        '• The link is personal and expires in 15 minutes — don’t share it',
+      ].join('\n'),
+      buttons: [signIn],
+      footer: 'Only you can see this',
+    });
   }
-  embed.setFooter({ text: 'Only you can see this' });
-  await respond(interaction, { embeds: [embed], components: [signInButtonRow(interaction.user.id)], flags: EPHEMERAL });
+  await respond(interaction, { ...payload, flags: ui.V2 | EPHEMERAL });
 }
 
 async function handleSignOut(interaction, data) {
@@ -1002,15 +1054,47 @@ async function handleSignOut(interaction, data) {
   });
 }
 
-async function sendLinkedConfirmation(discordUserId, account) {
+// Adds an AniList account to a server's tracked list (no backlog dump).
+async function trackInGuild(data, guildId, account, addedBy) {
+  const guildData = ensureGuildData(data, guildId);
+  if (guildData.users.some((u) => u.id === account.anilistId)) return { ok: false, reason: 'exists' };
+  const latest = await getRecentActivities(account.anilistId, 1).catch(() => []);
+  guildData.users.push({
+    username: account.anilistName,
+    id: account.anilistId,
+    lastActivityId: latest[0]?.id || 0,
+    addedBy,
+    avatar: account.avatar || null,
+    autoTracked: true,
+  });
+  await saveData(data);
+  return { ok: true, channelId: guildData.channelId };
+}
+
+async function sendLinkedConfirmation(discordUserId, account, guildId) {
   const user = await client.users.fetch(discordUserId).catch(() => null);
+  let trackedLine = '';
+  // Signing in from a server tracks you there too (unless its admins turned that off).
+  if (guildId && client.guilds.cache.has(guildId)) {
+    const data = await loadData();
+    const soc = await loadSocial();
+    const g = data.guilds[guildId];
+    if (g?.channelId && peekConfig(soc, guildId).autoTrack) {
+      const res = await trackInGuild(data, guildId, account, discordUserId).catch(() => ({ ok: false }));
+      if (res.ok) trackedLine = `\n\n📡 Your activity will now post in <#${res.channelId}> (**${ui.esc(client.guilds.cache.get(guildId)?.name || 'the server')}**).`;
+    }
+  }
   if (!user) return;
-  const embed = new EmbedBuilder()
-    .setColor(DEFAULT_COLOR)
-    .setTitle('✅ AniList linked')
-    .setDescription(`Your Discord account is now linked to **[${account.anilistName}](${account.siteUrl})**.\n\nUse \`/tracking\` in any server to turn your live activity posts on or off.`);
-  if (account.avatar) embed.setThumbnail(account.avatar);
-  await user.send({ embeds: [embed] }).catch(() => {});
+  await user
+    .send(
+      ui.notice({
+        label: 'AniList linked',
+        title: `✅ Linked to [${ui.esc(account.anilistName)}](${account.siteUrl})`,
+        body: `Use \`/tracking\` in any server to turn your live activity posts on or off.${trackedLine}`,
+        thumbnail: account.avatar,
+      })
+    )
+    .catch(() => {});
 }
 
 /* ----- /tracking (live activity on/off, owner only) ----- */
@@ -1022,34 +1106,42 @@ function trackedInGuilds(data, anilistId) {
   return names;
 }
 
-function buildTrackingPanel(data, account) {
+function buildTrackingPanel(data, account, guildId) {
   const off = isOptedOut(data, account.anilistId);
   const servers = trackedInGuilds(data, account.anilistId);
   const serverLine = servers.length
-    ? `Tracked in **${servers.length}** server${servers.length === 1 ? '' : 's'}: ${servers.slice(0, 10).join(', ')}${servers.length > 10 ? '…' : ''}`
+    ? `Tracked in **${servers.length}** server${servers.length === 1 ? '' : 's'}: ${servers.slice(0, 10).map((n) => ui.esc(n)).join(', ')}${servers.length > 10 ? '…' : ''}`
     : 'Nobody is tracking your profile right now.';
-
-  const embed = new EmbedBuilder()
-    .setColor(off ? 0xfb7185 : 0x34d399)
-    .setAuthor({ name: account.anilistName, iconURL: account.avatar || undefined, url: account.siteUrl })
-    .setTitle(off ? '🔴 Live activity is OFF' : '🟢 Live activity is ON')
-    .setDescription(
-      [
-        off
-          ? 'Your AniList updates are **not** being posted in any server (your stats and streak still update privately). Turning it back on starts from your *next* update — nothing you did while it was off gets posted.'
-          : 'Your AniList updates are posted in every server tracking you.',
-        '',
-        serverLine,
-      ].join('\n')
-    )
-    .setFooter({ text: 'Only you can change this — it applies everywhere' });
-
-  const row = new ActionRowBuilder().addComponents(
-    off
-      ? new ButtonBuilder().setCustomId('trk_on').setLabel('Turn on').setEmoji('🟢').setStyle(ButtonStyle.Success)
-      : new ButtonBuilder().setCustomId('trk_off').setLabel('Turn off').setEmoji('🔴').setStyle(ButtonStyle.Danger)
-  );
-  return { embeds: [embed], components: [row] };
+  const here = guildId ? data.guilds[guildId] : null;
+  const trackedHere = here && (here.users || []).some((u) => u.id === account.anilistId);
+  const hereLine = !guildId
+    ? null
+    : !here?.channelId
+      ? '-# This server hasn’t picked an activity channel yet (admins: `/serversettings`).'
+      : trackedHere
+        ? `-# ✅ Tracked here · posts go to <#${here.channelId}>`
+        : '-# ⚠️ You’re **not tracked in this server** yet — that’s why nothing posts here.';
+  return ui.notice({
+    accent: off ? 0xfb7185 : 0x34d399,
+    label: `Live activity · ${account.anilistName}`,
+    title: off ? '🔴 Live activity is OFF' : '🟢 Live activity is ON',
+    thumbnail: account.avatar,
+    body: [
+      off
+        ? 'Your AniList updates are **not** posted anywhere (your stats and streak still update privately). Turning it back on starts from your *next* update — nothing you did while it was off gets posted.'
+        : 'Your AniList updates are posted in every server tracking you.',
+      '',
+      serverLine,
+      hereLine,
+    ]
+      .filter((x) => x !== null)
+      .join('\n'),
+    buttons: [
+      off ? ui.button('trk_on', 'Turn on', { emoji: '🟢', style: ButtonStyle.Success }) : ui.button('trk_off', 'Turn off', { emoji: '🔴', style: ButtonStyle.Danger }),
+      trackHereButton(data, guildId, account.anilistId),
+    ],
+    footer: 'Only you can change this — it applies everywhere',
+  });
 }
 
 async function setLiveActivity(data, account, on, byUserId) {
@@ -1075,15 +1167,15 @@ async function setLiveActivity(data, account, on, byUserId) {
 async function handleTracking(interaction, data) {
   const account = data.linkedAccounts[interaction.user.id];
   if (!account) {
-    const embed = new EmbedBuilder()
-      .setColor(DEFAULT_COLOR)
-      .setTitle('🔐 Sign in first')
-      .setDescription(
-        'To make sure only the **real owner** of an AniList profile can turn its live activity on or off, link your AniList account first with `/signin` — then run `/tracking` again.'
-      );
-    const payload = { embeds: [embed], flags: EPHEMERAL };
-    if (isOAuthConfigured()) payload.components = [signInButtonRow(interaction.user.id)];
-    await respond(interaction, payload);
+    await respond(interaction, {
+      ...ui.notice({
+        label: 'Live activity',
+        title: '🔐 Sign in first',
+        body: 'To make sure only the **real owner** of an AniList profile can turn its live activity on or off, link your AniList account first with `/signin` — then run `/tracking` again.',
+        buttons: isOAuthConfigured() ? [ui.linkButton(signInUrlFor(interaction.user.id, interaction.guildId), 'Sign in with AniList', '🔐')] : [],
+      }),
+      flags: ui.V2 | EPHEMERAL,
+    });
     return;
   }
 
@@ -1092,7 +1184,7 @@ async function handleTracking(interaction, data) {
     if (!(await safeDefer(interaction, true))) return;
     await setLiveActivity(data, account, status === 'on', interaction.user.id);
   }
-  await respond(interaction, { ...buildTrackingPanel(data, account), flags: EPHEMERAL });
+  await respond(interaction, { ...buildTrackingPanel(data, account, interaction.guildId), flags: ui.V2 | EPHEMERAL });
 }
 
 async function handleTrackingButton(interaction, on) {
@@ -1108,58 +1200,48 @@ async function handleTrackingButton(interaction, on) {
     return;
   }
   await setLiveActivity(data, account, on, interaction.user.id);
-  await interaction.editReply(buildTrackingPanel(data, account)).catch((e) => console.error('Failed to refresh tracking panel:', e.message));
+  await interaction.editReply(buildTrackingPanel(data, account, interaction.guildId)).catch((e) => console.error('Failed to refresh tracking panel:', e.message));
+}
+
+// "Post my activity in this server" (from /signin and /tracking).
+async function handleTrackHereButton(interaction) {
+  const data = await loadData();
+  const account = data.linkedAccounts[interaction.user.id];
+  if (!account || !interaction.guildId) return respond(interaction, { content: 'Sign in with `/signin` first.', flags: EPHEMERAL });
+  try {
+    await interaction.deferUpdate();
+  } catch {
+    return;
+  }
+  const res = await trackInGuild(data, interaction.guildId, account, interaction.user.id);
+  const note = res.ok ? `✅ Done — your next AniList update posts in <#${res.channelId}>.` : 'You’re already tracked here.';
+  await interaction.editReply(buildTrackingPanel(data, account, interaction.guildId)).catch(() => {});
+  await interaction.followUp({ content: note, flags: EPHEMERAL }).catch(() => {});
 }
 
 /* ----- /help ----- */
 async function handleHelp(interaction) {
-  const embed = new EmbedBuilder()
-    .setColor(DEFAULT_COLOR)
-    .setTitle('✦ AniTracker commands')
-    .addFields(
-      {
-        name: '📡 Tracking',
-        value: [
-          '`/track` — post someone’s AniList activity here',
-          '`/untrack` — stop tracking a profile',
-          '`/list` · `/whostracking` — who’s tracked in this server',
-          '`/setchannel` — where updates post *(Manage Server)*',
-        ].join('\n'),
-      },
-      {
-        name: '🪪 Your profile',
-        value: [
-          '`/profile` — your anime page (or `/profile user:@someone`)',
-          '`/settings` — theme, banner, showcase, activity style, privacy',
-          '`/signin` · `/signout` — link your AniList · `/tracking` — posts on/off',
-        ].join('\n'),
-      },
-      {
-        name: '📚 Lists & reviews',
-        value: [
-          '`/anime info · search · trending · random · airing` — look anything up',
-          '`/watchlater` · `/myfavorites` · `/rotation` — view, add, remove',
-          '`/collection` — custom lists like “Comfort Anime”',
-          '`/recommend` — recommend an anime with a message',
-          '`/review write` · `/review browse` — write and discover reviews',
-          '`/favorites` — anyone’s AniList favourites',
-        ].join('\n'),
-      },
-      {
-        name: '📊 Stats & community',
-        value: ['`/stats` — month, lifetime, streaks · `/recap` — monthly recap', '`/leaderboard` — server boards · `/recommendanimes` — most recommended'].join('\n'),
-      },
-      { name: '💬 Other', value: '`/feedback` — rate AniTracker & tell the developer anything\n`/update` — post an update notice silently *(Manage Server)*' },
-      {
-        name: '🔘 Buttons on activity posts',
-        value: '💜 Recommend · 🤍 Like · ⭐ Favorite · 📌 Watch later\n✍️ Review · 🗂️ Save to list · 📊 More info — replies only you can see\nReact to a post and its owner gets a private DM.',
-      }
-    );
+  const sections = [
+    ['📡 Tracking', ['`/track` — post someone’s AniList activity here', '`/untrack` — stop tracking a profile', '`/list` · `/whostracking` — who’s tracked in this server', '`/serversettings` — channel, recaps, boards & more *(admins)*']],
+    ['🪪 Your profile', ['`/profile` — your anime page (or `/profile user:@someone`)', '`/settings` — theme, banner, showcase, activity style, privacy', '`/signin` · `/signout` — link your AniList · `/tracking` — posts on/off']],
+    [
+      '📚 Lists & reviews',
+      ['`/anime info · search · trending · random · airing` — look anything up', '`/watchlater` · `/myfavorites` · `/rotation` — view, add, remove', '`/collection` — custom lists like “Comfort Anime”', '`/recommend` — recommend an anime with a message', '`/review write · read · browse` — write and discover reviews', '`/favorites` — anyone’s AniList favourites'],
+    ],
+    ['📊 Stats & community', ['`/stats` — month, lifetime, streaks · `/recap` — monthly recap', '`/leaderboard` — server boards · `/recommendanimes` — most recommended', '-# Weekly + monthly server recaps post automatically; your personal recap arrives by DM on the 1st']],
+    ['💬 Other', ['`/feedback` — rate AniTracker & tell the developer anything', '`/update` — post an update notice silently *(Manage Server)*']],
+    ['🔘 On activity posts', ['🤍 Like · ✍️ Review · 🗂️ Save to a list · 📊 More info — replies only you can see', 'React to a post and its owner gets a private DM']],
+  ];
+  const children = [ui.row(['-# ✦ ANITRACKER', '## Commands & buttons', '-# Everything AniTracker can do'], client.user.displayAvatarURL({ size: 256, extension: 'png' }))];
+  for (const [title, lines] of sections) {
+    children.push(ui.divider());
+    children.push(ui.text(`**${title}**\n${lines.join('\n')}`));
+  }
   const invite = getInviteUrl();
-  const components = invite
-    ? [new ActionRowBuilder().addComponents(new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel('Add AniTracker to a server').setURL(invite))]
-    : [];
-  await respond(interaction, { embeds: [embed], components, flags: EPHEMERAL });
+  const links = [invite ? ui.linkButton(invite, 'Add to a server', '➕') : null, ui.linkButton(nudge.TOPGG_URL, 'Review on Top.gg', '⭐')];
+  children.push(ui.divider());
+  children.push(ui.actionRow(links));
+  await respond(interaction, { ...ui.fit([ui.card(DEFAULT_COLOR, children)]), flags: ui.V2 | EPHEMERAL });
 }
 
 /* ----- /update (silent announcement in this server) ----- */
@@ -1184,27 +1266,14 @@ async function handleUpdate(interaction, guildData) {
     return;
   }
 
-  const embed = new EmbedBuilder().setColor(DEFAULT_COLOR).setTimestamp(new Date());
-  if (custom) {
-    embed
-      .setAuthor({ name: 'AniTracker update', iconURL: client.user.displayAvatarURL({ size: 64 }) })
-      .setDescription(custom.replace(/\\n/g, '\n'))
-      .setFooter({ text: `Posted by ${interaction.member?.displayName || interaction.user.username}` });
-  } else {
-    embed
-      .setTitle(LATEST_UPDATE.title)
-      .setThumbnail(client.user.displayAvatarURL({ size: 128 }))
-      .setDescription(LATEST_UPDATE.items.map((i) => `• ${i}`).join('\n'))
-      .setFooter({ text: LATEST_UPDATE.footer });
-  }
+  const avatar = client.user.displayAvatarURL({ size: 256, extension: 'png' });
+  const payload = custom
+    ? ui.notice({ label: 'AniTracker update', title: null, body: ui.softEsc(custom.replace(/\\n/g, '\n')), thumbnail: avatar, footer: `Posted by ${ui.esc(interaction.member?.displayName || interaction.user.username)}` })
+    : ui.notice({ label: 'What’s new', title: LATEST_UPDATE.title, body: LATEST_UPDATE.items.map((i) => `• ${i}`).join('\n'), thumbnail: avatar, footer: LATEST_UPDATE.footer });
 
   try {
-    await channel.send({
-      embeds: [embed],
-      // @silent: shows normally, but no push notification or sound for anyone.
-      flags: MessageFlags.SuppressNotifications,
-      allowedMentions: { parse: [] },
-    });
+    // @silent: shows normally, but no push notification or sound for anyone.
+    await channel.send({ ...payload, flags: ui.V2 | MessageFlags.SuppressNotifications, allowedMentions: { parse: [] } });
   } catch (e) {
     await respond(interaction, { content: `Couldn't post: ${e.message}`, flags: EPHEMERAL });
     return;
@@ -1250,7 +1319,7 @@ async function handleModalSubmit(interaction) {
   data.feedback.unshift(entry);
   await saveData(data);
   console.log(`New feedback (${submission.rating}/5) from ${interaction.user.username}: ${submission.title}`);
-  await respond(interaction, { embeds: [feedback.buildThanksEmbed(entry)], flags: EPHEMERAL });
+  await respond(interaction, { ...feedback.buildThanksCard(entry), flags: ui.V2 | EPHEMERAL });
 }
 
 /* ---------------------------------------------------------------------------
@@ -1259,6 +1328,7 @@ async function handleModalSubmit(interaction) {
 async function handleButton(interaction) {
   const { customId } = interaction;
   if (customId === 'trk_on' || customId === 'trk_off') return handleTrackingButton(interaction, customId === 'trk_on');
+  if (customId === 'trk_here') return handleTrackHereButton(interaction);
 
   if (!interaction.guildId) return;
   const [action, idStr] = customId.split('_');
@@ -1267,8 +1337,10 @@ async function handleButton(interaction) {
 
   // The review form must be the very first response (no defer before a modal).
   if (action === 'rvw') {
-    const embedTitle = interaction.message?.embeds?.[0]?.description?.match(/^# \[(.+?)\]\(/m)?.[1];
-    return reviewsFeature.openWriteForm(interaction, mediaId, embedTitle);
+    const data = await loadData();
+    const post = data.guilds[interaction.guildId]?.recentPosts?.[interaction.message?.id];
+    const knownTitle = post?.mediaTitle || post?.animeTitle || interaction.message?.embeds?.[0]?.description?.match(/^# \[(.+?)\]\(/m)?.[1];
+    return reviewsFeature.openWriteForm(interaction, mediaId, knownTitle);
   }
 
   // Ack Discord's 3s window first. If that fails the interaction is gone.
@@ -1367,15 +1439,24 @@ async function applyRecommendVote(guildId, userId, media, add) {
   await saveData(data);
 }
 
+// Updates the counts on a post after a Like (or an old Recommend) click.
+// Modern posts only get their Like label rewritten; classic embed posts
+// (from before the layout change) switch to the new, slimmer button row.
 async function refreshPostButtons(interaction, guildData, rootId) {
   try {
+    const msg = interaction.message;
+    const likeCount = guildData.recentPosts[msg.id]?.likes?.length || 0;
+    const json = (msg.components || []).map((c) => (typeof c.toJSON === 'function' ? c.toJSON() : c));
+    if (msg.flags?.has?.(MessageFlags.IsComponentsV2)) {
+      await msg.edit({ components: activityPost.withLikeCount(json, likeCount) });
+      return;
+    }
+    const infoId = activityPost.findButtonId(json, 'info') || rootId;
+    const editPayload = { components: [postRow(rootId, infoId, likeCount)] };
     const recCount = guildData.recommendations[rootId]?.recommendedBy?.length || 0;
-    const likeCount = guildData.recentPosts[interaction.message.id]?.likes?.length || 0;
-    const infoId = findInfoIdOnMessage(interaction.message) || rootId;
-    const editPayload = { components: buildActivityButtons(rootId, infoId, recCount, likeCount) };
-    const existingEmbed = interaction.message.embeds[0];
+    const existingEmbed = msg.embeds[0];
     if (existingEmbed) editPayload.embeds = [EmbedBuilder.from(existingEmbed).setFooter({ text: buildFooterText(recCount) })];
-    await interaction.message.edit(editPayload);
+    await msg.edit(editPayload);
   } catch (e) {
     console.error('Failed to refresh post buttons:', e.message);
   }
@@ -1407,18 +1488,19 @@ async function handleRecommendButton(interaction, data, guildData, mediaId) {
       const owner = await client.users.fetch(ownerId).catch(() => null);
       if (owner) {
         const animeName = rec.title || postInfo.animeTitle || 'an anime';
-        const embed = new EmbedBuilder()
-          .setColor(interaction.message.embeds[0]?.color ?? RECOMMEND_EMBED_COLOR)
-          .setAuthor({ name: `${interaction.user.displayName || interaction.user.username} recommended it 💜`, iconURL: interaction.user.displayAvatarURL({ size: 64 }) })
-          .setDescription(`<@${userId}> recommended **${rec.siteUrl ? `[${animeName}](${rec.siteUrl})` : animeName}** that you were watching!\n\n🏠 **${interaction.guild.name}**`)
-          .setFooter({ text: interaction.guild.name, iconURL: interaction.guild.iconURL({ size: 64 }) || undefined })
-          .setTimestamp(new Date());
         const cover = postInfo?.cover || interaction.message.embeds[0]?.image?.url || interaction.message.embeds[0]?.thumbnail?.url;
-        if (cover) embed.setThumbnail(cover);
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel('Jump to post').setEmoji('↗️').setURL(interaction.message.url)
-        );
-        await owner.send({ embeds: [embed], components: [row], allowedMentions: { parse: [] } }).catch((e) => console.error('Failed to DM recommend notification:', e.message));
+        await owner
+          .send(
+            ui.notice({
+              accent: postInfo?.color ?? interaction.message.embeds[0]?.color ?? RECOMMEND_EMBED_COLOR,
+              label: '💜 New recommendation',
+              title: `${ui.esc(interaction.user.displayName || interaction.user.username)} recommended it`,
+              body: `<@${userId}> recommended **${rec.siteUrl ? `[${ui.esc(animeName)}](${rec.siteUrl})` : ui.esc(animeName)}** that you were watching!\n-# 🏠 ${ui.esc(interaction.guild.name)}`,
+              thumbnail: cover,
+              buttons: [ui.linkButton(interaction.message.url, 'Jump to post', '↗️')],
+            })
+          )
+          .catch((e) => console.error('Failed to DM recommend notification:', e.message));
       }
     }
   }
@@ -1445,7 +1527,7 @@ async function handleLikeButton(interaction, data, guildData, rootId) {
   post.likes = had ? post.likes.filter((x) => x !== userId) : [...post.likes, userId];
   await saveData(data);
   await refreshPostButtons(interaction, guildData, rootId);
-  await respond(interaction, { content: had ? 'Unliked.' : '❤️ Liked!' });
+  await respond(interaction, { content: had ? '🤍 Unliked.' : '❤️ Liked! They’ll get a quiet DM.' });
 
   const ownerId = profileOwnerId(data, post.anilistId, post.addedBy);
   if (had || !ownerId || ownerId === userId) return;
@@ -1454,25 +1536,19 @@ async function handleLikeButton(interaction, data, guildData, rootId) {
   reactionDmSeen.set(key, Date.now());
   const owner = await client.users.fetch(ownerId).catch(() => null);
   if (!owner) return;
-  const embed = new EmbedBuilder()
-    .setColor(interaction.message.embeds[0]?.color ?? DEFAULT_COLOR)
-    .setAuthor({ name: `${interaction.user.displayName || interaction.user.username} liked your activity ❤️`, iconURL: interaction.user.displayAvatarURL({ size: 64 }) })
-    .setDescription(`<@${userId}> liked you watching **${post.animeTitle || 'an anime'}**\n\n🏠 **${interaction.guild.name}**`)
-    .setFooter({ text: interaction.guild.name, iconURL: interaction.guild.iconURL({ size: 64 }) || undefined })
-    .setTimestamp(new Date());
   const cover = post.cover || interaction.message.embeds[0]?.image?.url || interaction.message.embeds[0]?.thumbnail?.url;
-  if (cover) embed.setThumbnail(cover);
-  const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel('Jump to post').setEmoji('↗️').setURL(interaction.message.url));
-  await owner.send({ embeds: [embed], components: [row], allowedMentions: { parse: [] } }).catch(() => {});
-}
-
-function findInfoIdOnMessage(message) {
-  for (const row of message?.components || []) {
-    for (const c of row.components || []) {
-      if (c.customId?.startsWith('info_')) return parseInt(c.customId.split('_')[1], 10) || null;
-    }
-  }
-  return null;
+  await owner
+    .send(
+      ui.notice({
+        accent: post.color ?? interaction.message.embeds[0]?.color ?? DEFAULT_COLOR,
+        label: '❤️ New like',
+        title: `${ui.esc(interaction.user.displayName || interaction.user.username)} liked your activity`,
+        body: `<@${userId}> liked you watching **${ui.esc(post.animeTitle || 'an anime')}**\n-# 🏠 ${ui.esc(interaction.guild.name)}`,
+        thumbnail: cover,
+        buttons: [ui.linkButton(interaction.message.url, 'Jump to post', '↗️')],
+      })
+    )
+    .catch(() => {});
 }
 
 /* ----- More Info ----- */
@@ -1506,7 +1582,7 @@ async function getFranchiseSeasonIds(rootId) {
 }
 
 // The "More Info" panel for any anime (used by the post button and /anime).
-async function buildMoreInfoPayload(mediaId) {
+async function buildMoreInfoPayload(mediaId, extra = {}) {
   let media;
   try {
     media = await getMediaDetailsCached(mediaId);
@@ -1530,7 +1606,7 @@ async function buildMoreInfoPayload(mediaId) {
       console.error('Season count failed:', e.message);
     }
   }
-  return buildMoreInfo(media, { seasonNumber, totalSeasons });
+  return buildMoreInfo(media, { seasonNumber, totalSeasons, ...extra });
 }
 
 async function handleMoreInfoButton(interaction, mediaId) {
@@ -1543,68 +1619,18 @@ async function handleMoreInfoButton(interaction, mediaId) {
 }
 
 /* ---------------------------------------------------------------------------
- * Activity post building
+ * Activity post building (layout lives in features/activityPost.js)
  * ------------------------------------------------------------------------- */
-// Two rows under every activity post:
-//   💜 Recommend · ❤️ Like · ⭐ Favorite · 📌 Watch later
-//   ✍️ Review · 🗂️ Save to list · 📊 More info
-function buildActivityButtons(rootId, infoMediaId, recommendCount = 0, likeCount = 0) {
-  const target = infoMediaId || rootId;
-  return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`rec_${rootId}`)
-        .setLabel(recommendCount ? `Recommend · ${recommendCount}` : 'Recommend')
-        .setEmoji('💜')
-        .setStyle(ButtonStyle.Primary),
-      new ButtonBuilder()
-        .setCustomId(`like_${rootId}`)
-        .setLabel(likeCount ? `Like · ${likeCount}` : 'Like')
-        .setEmoji('🤍')
-        .setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId(`fav_${rootId}`).setLabel('Favorite').setEmoji('⭐').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`wl_${rootId}`).setLabel('Watch later').setEmoji('📌').setStyle(ButtonStyle.Secondary)
-    ),
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`rvw_${target}`).setLabel('Review').setEmoji('✍️').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`col_${rootId}`).setLabel('Save to list').setEmoji('🗂️').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`info_${target}`).setLabel('More info').setEmoji('📊').setStyle(ButtonStyle.Secondary)
-    ),
-  ];
+function postRow(rootId, infoMediaId, likeCount = 0) {
+  return activityPost.postButtons(rootId, infoMediaId, { likeCount, rateLabel: POST_RATE_BUTTON });
 }
+// The ⭐ Rate button on posts (part of the ratings feature).
+const POST_RATE_BUTTON = false;
 
+// Footer for classic (pre-layout-change) embed posts when their buttons refresh.
 function buildFooterText(recommendCount) {
   if (recommendCount > 0) return `Recommended by ${recommendCount} ${recommendCount === 1 ? 'person' : 'people'} • AniList`;
   return 'AniList';
-}
-
-function statusEmoji(status) {
-  const s = (status || '').toLowerCase();
-  if (s.includes('complet')) return '✅';
-  if (s.includes('drop')) return '🗑️';
-  if (s.includes('paus')) return '⏸️';
-  if (s.includes('plan')) return '📌';
-  if (s.includes('rewatch') || s.includes('reread')) return '🔁';
-  if (s.includes('watch')) return '▶️';
-  if (s.includes('read')) return '📖';
-  return '📺';
-}
-
-function statusVerbShort(status) {
-  const s = (status || '').toLowerCase();
-  if (s.includes('complet')) return 'Completed';
-  if (s.includes('drop')) return 'Dropped';
-  if (s.includes('paus')) return 'Paused';
-  if (s.includes('plan')) return s.includes('read') ? 'Plans to read' : 'Plans to watch';
-  if (s.includes('rewatch')) return 'Rewatched';
-  if (s.includes('reread')) return 'Reread';
-  if (s.includes('watch')) return 'Watched';
-  if (s.includes('read')) return 'Read';
-  return capitalize(s) || 'Updated';
-}
-
-function capitalize(s) {
-  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 }
 
 function getPopularityRank(rankings) {
@@ -1665,115 +1691,21 @@ async function resolveSeasonInfo(mediaId, fallbackTitle, fallbackSiteUrl, mediaT
   return result;
 }
 
-function stripMarkup(text) {
-  return (text || '')
-    .replace(/img\d*\(.*?\)/g, '')
-    .replace(/webm\(.*?\)/g, '')
-    .replace(/youtube\(.*?\)/g, '')
-    .replace(/~!.*?!~/gs, '')
-    .replace(/[_*~`]/g, '')
-    .trim();
+// AniList gives most covers a colour; only decode the image when it doesn't.
+async function coverColor(media) {
+  const hex = media?.coverImage?.color;
+  if (typeof hex === 'string' && /^#?[0-9a-f]{6}$/i.test(hex)) return parseInt(hex.replace('#', ''), 16);
+  const cover = media?.coverImage || {};
+  return getDominantColor(cover.medium || cover.large || cover.extraLarge);
 }
 
-function stripDescription(text) {
-  if (!text) return '';
-  return text
-    .replace(/~!.*?!~/gs, '')
-    .replace(/<br\s*\/?>/gi, ' ')
-    .replace(/<\/?[a-z][^>]*>/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+async function buildPostPayload({ username, activity, seasonInfo, look, ownerId, mentionId, streak, cfg, likeCount = 0, preview = false }) {
+  const color = activity.media ? await coverColor(activity.media).catch(() => DEFAULT_COLOR) : DEFAULT_COLOR;
+  const extra = postExtras ? await postExtras({ activity, seasonInfo, cfg }).catch(() => ({})) : {};
+  return activityPost.buildActivityPost({ username, activity, streak, seasonInfo, look, ownerId, mentionId, color, cfg, likeCount, preview, rateLabel: POST_RATE_BUTTON, ...extra });
 }
-
-function truncate(text, max) {
-  if (!text) return '';
-  return text.length > max ? `${text.slice(0, max).trimEnd()}…` : text;
-}
-
-// "season 2, episode 5" / "episodes 3 - 5" / "chapter 120"
-function progressText(activity, season) {
-  const isManga = activity.media?.type === 'MANGA';
-  const parts = [];
-  if (season && !isManga) parts.push(`season ${season}`);
-  if (activity.progress) {
-    const range = String(activity.progress).includes('-');
-    const unit = isManga ? (range ? 'chapters' : 'chapter') : range ? 'episodes' : 'episode';
-    parts.push(`${unit} ${activity.progress}`);
-  }
-  return parts.join(', ');
-}
-
-// `look` = the profile owner's activity-post settings (style, colour, which
-// details to show). With no settings saved, this produces the original look.
-async function buildEmbed(username, avatarUrl, activity, streak, seasonInfo, look = null) {
-  const a = look?.activity || { style: 'full', color: 'cover', show: social.DEFAULT_ACTIVITY_FIELDS };
-  const show = new Set(a.show || social.DEFAULT_ACTIVITY_FIELDS);
-  const style = a.style || 'full';
-  const embed = new EmbedBuilder().setTimestamp(new Date(activity.createdAt * 1000));
-  const authorOpts = {
-    name: show.has('streak') && streak > 0 ? `✦ ${username} 🔥 ${streak}` : `✦ ${username}`,
-    url: `https://anilist.co/user/${encodeURIComponent(username)}`,
-  };
-  if (avatarUrl) authorOpts.iconURL = avatarUrl;
-  embed.setAuthor(authorOpts);
-
-  if (activity.__typename === 'ListActivity' && activity.media) {
-    const { season, rootTitle, rootSiteUrl, popularityRank } = seasonInfo;
-    const progress = progressText(activity, season);
-    const verb = statusVerbShort(activity.status);
-    const captionLine = `${progress ? `${verb} ${progress}` : verb} ${statusEmoji(activity.status)}`;
-    // "# " header renders bigger than Title and doesn't force an underline.
-    const headerLine = `${style === 'minimal' ? '##' : '#'} [${rootTitle}](${rootSiteUrl})`;
-
-    const cover = activity.media.coverImage || {};
-    const displayImage = cover.extraLarge || cover.large || cover.medium;
-    let color;
-    if (a.color === 'theme') color = paletteFor(look?.profile).accent;
-    else if (a.color === 'anilist') color = DEFAULT_COLOR;
-    else color = await getDominantColor(cover.medium || cover.large || displayImage);
-
-    const infoBits = [];
-    if (show.has('rating') && typeof activity.media.averageScore === 'number') infoBits.push(`⭐ ${(activity.media.averageScore / 10).toFixed(1)}/10`);
-    if (show.has('genres') && activity.media.genres?.length) infoBits.push(`🎭 ${activity.media.genres.slice(0, 3).join(', ')}`);
-    if (activity.media.isAdult) infoBits.push('🔞 Mature');
-    if (show.has('popularity') && popularityRank) infoBits.push(`❤️ #${popularityRank} Most Popular`);
-    const infoLine = style === 'minimal' ? '' : infoBits.join('  •  ');
-
-    const synopsisMax = style === 'compact' ? 100 : 160;
-    const synopsis = style !== 'minimal' && show.has('description') ? truncate(stripDescription(activity.media.description), synopsisMax) : '';
-    const descParts = [`${captionLine}\n${headerLine}`];
-    if (infoLine) descParts.push(infoLine);
-    if (synopsis) descParts.push(synopsis);
-    embed.setDescription(descParts.join('\n\n'));
-
-    embed.setColor(color).setFooter({ text: buildFooterText(0) });
-    if (show.has('cover') && displayImage) {
-      if (style === 'full') embed.setImage(displayImage);
-      else embed.setThumbnail(displayImage);
-    }
-  } else if (activity.__typename === 'TextActivity') {
-    embed
-      .setColor(DEFAULT_COLOR)
-      .setTitle('💬 Posted a status update')
-      .setURL(activity.siteUrl)
-      .setDescription(truncate(stripMarkup(activity.text), 300) || '*(image or media post)*')
-      .setFooter({ text: 'AniList' });
-  } else if (activity.__typename === 'MessageActivity') {
-    embed
-      .setColor(DEFAULT_COLOR)
-      .setTitle('💬 Posted a message')
-      .setURL(activity.siteUrl)
-      .setDescription(truncate(stripMarkup(activity.message), 300) || '*(image or media post)*')
-      .setFooter({ text: 'AniList' });
-  } else {
-    embed
-      .setColor(DEFAULT_COLOR)
-      .setTitle('📺 New AniList activity')
-      .setURL(`https://anilist.co/user/${encodeURIComponent(username)}`)
-      .setFooter({ text: 'AniList' });
-  }
-  return embed;
-}
+// Hook for extra post details (community rating). Set by the ratings feature.
+let postExtras = null;
 
 /* ---------------------------------------------------------------------------
  * Poller
@@ -1799,49 +1731,90 @@ async function pollAllGuilds() {
   }
 }
 
+function sortEvents(list) {
+  return list.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || (a.id || 0) - (b.id || 0));
+}
+
 async function pollOnce() {
   const data = await loadData();
   const soc = await loadSocial();
   const st = await loadStats();
-  // Each AniList profile is fetched once per poll, however many servers track it.
-  const activityCache = new Map();
-  const fetchActivities = (anilistId) => {
-    if (!activityCache.has(anilistId)) activityCache.set(anilistId, getRecentActivities(anilistId, 25));
-    return activityCache.get(anilistId);
-  };
   const tzFor = (anilistId) => {
     const ownerId = social.discordFor(data, anilistId);
     return (ownerId && soc.users[ownerId]?.prefs?.timezone) || social.DEFAULT_TZ;
   };
 
-  // 1) Stats & streaks — for every AniList account we know: tracked in a
-  //    server OR signed in with /signin. Recorded even when posting is off.
+  // Every AniList account we know: tracked in a server OR signed in.
   const accounts = new Set();
   for (const [guildId, g] of Object.entries(data.guilds)) {
     if (!client.guilds.cache.has(guildId)) continue;
     for (const u of g.users || []) accounts.add(u.id);
   }
   for (const acct of Object.values(data.linkedAccounts)) accounts.add(acct.anilistId);
-  let statsChanged = false;
-  for (const anilistId of accounts) {
+  // Start somewhere different each poll, so if AniList rate-limits us part
+  // way through, it's not always the same people who miss out.
+  const order = [...accounts];
+  if (order.length) {
+    const k = pollRotation++ % order.length;
+    order.push(...order.splice(0, k));
+  }
+
+  // 1) Fetch each account once: activities + recent list entries. Work out
+  //    merged / no-activity updates (features/feed.js).
+  const feeds = new Map(); // anilistId -> { activities, entries, merged, synthetic }
+  let coreChanged = false;
+  for (const anilistId of order) {
     if (isPaused) break;
     try {
-      const acts = await fetchActivities(anilistId);
-      if (statsEngine.record(st, anilistId, acts, tzFor(anilistId))) statsChanged = true;
+      const f = await getRecentFeed(anilistId, 25);
+      const ev = feed.expand(feed.stateFor(data, anilistId), f.activities, f.entries);
+      feeds.set(anilistId, { ...f, ...ev });
+      coreChanged = true;
+      const latest = f.activities[0];
+      feedHealth.set(anilistId, { at: Date.now(), ok: true, error: null, latestId: latest?.id || null, latestAt: latest?.createdAt || null, entries: f.entries ? f.entries.length : null, merged: ev.merged.length, synthetic: ev.synthetic.length });
+      if (ev.merged.length || ev.synthetic.length) console.log(`[feed] AniList ${anilistId}: ${ev.merged.length} merged + ${ev.synthetic.length} list-only update(s)`);
+    } catch (e) {
+      feedHealth.set(anilistId, { ...(feedHealth.get(anilistId) || {}), at: Date.now(), ok: false, error: e.message.slice(0, 300) });
+      console.error(`Failed fetching AniList user ${anilistId}:`, e.message);
+    }
+    if (feedHealth.size > 2000) feedHealth.delete(feedHealth.keys().next().value);
+  }
+
+  // 2) Specific tags (Isekai, Satire…) for the shows in this poll's new
+  //    updates — one request for all of them.
+  const dayAgo = Date.now() / 1000 - 86400;
+  const needTags = new Set();
+  for (const f of feeds.values()) {
+    for (const a of [...f.activities, ...f.merged, ...f.synthetic]) if (a.media && (a.createdAt || 0) > dayAgo) needTags.add(a.media.id);
+  }
+  if (needTags.size) {
+    try {
+      const tags = await getMediaTags([...needTags]);
+      for (const f of feeds.values()) for (const a of [...f.activities, ...f.merged, ...f.synthetic]) if (a.media && tags.has(a.media.id)) a.media.tags = tags.get(a.media.id);
+    } catch (e) {
+      console.warn('Tag lookup failed (posts fall back to genres):', e.message);
+    }
+  }
+
+  // 3) Stats & streaks — recorded even when posting is off.
+  let statsChanged = false;
+  for (const [anilistId, f] of feeds) {
+    try {
+      if (statsEngine.record(st, anilistId, f.activities, tzFor(anilistId), [...f.merged, ...f.synthetic])) statsChanged = true;
     } catch (e) {
       console.error(`Failed recording stats for AniList user ${anilistId}:`, e.message);
     }
   }
   if (statsChanged) saveStats();
 
-  // 2) Post new activity in each server.
-  let changed = false;
-
+  // 4) Post new activity in each server.
+  let changed = coreChanged;
   for (const guildId of Object.keys(data.guilds)) {
     if (isPaused) break;
     const guildData = ensureGuildData(data, guildId);
     if (!guildData.channelId || !guildData.users.length) continue;
     if (!client.guilds.cache.has(guildId)) continue; // bot was removed from this server
+    const cfg = peekConfig(soc, guildId);
 
     const channel = await client.channels.fetch(guildData.channelId).catch(() => null);
     if (!channel) continue;
@@ -1856,14 +1829,24 @@ async function pollOnce() {
     warnedChannels.delete(channel.id);
 
     for (const user of [...guildData.users]) {
+      const f = feeds.get(user.id);
+      if (!f) continue; // fetch failed this poll — try again next time
       try {
-        const activities = await fetchActivities(user.id);
-        const newOnes = activities.filter((a) => a.id > (user.lastActivityId || 0)).sort((a, b) => a.id - b.id);
-        if (!newOnes.length) continue;
+        const last = user.lastActivityId || 0;
+        const fresh = f.activities.filter((a) => a.id > last);
+        // Merged updates only for activities this server already posted;
+        // list-only updates always (the feed memory prevents backlogs).
+        const extra = [...f.merged.filter((a) => a.id <= last), ...f.synthetic];
+        const events = sortEvents([...fresh, ...extra]);
+        if (!events.length) continue;
+        const advance = () => {
+          const maxId = Math.max(last, ...fresh.map((a) => a.id));
+          if (maxId > (user.lastActivityId || 0)) user.lastActivityId = maxId;
+          changed = true;
+        };
         if (isOptedOut(data, user.id)) {
           // Owner turned live activity off: skip posting, but don't build a backlog either.
-          user.lastActivityId = Math.max(user.lastActivityId || 0, ...newOnes.map((a) => a.id));
-          changed = true;
+          advance();
           continue;
         }
 
@@ -1871,7 +1854,17 @@ async function pollOnce() {
         const look = ownerId && soc.users[ownerId] ? social.getUser(soc, ownerId) : null;
         const streak = statsEngine.streakOf(st.users[String(user.id)], tzFor(user.id)).current;
 
-        for (const activity of newOnes) {
+        for (const activity of events) {
+          const isText = activity.__typename === 'TextActivity' || activity.__typename === 'MessageActivity';
+          const skip =
+            (isText && !cfg.postText) ||
+            (activity.media?.type === 'MANGA' && !cfg.postManga) ||
+            (activity.media?.isAdult && cfg.mature === 'skip');
+          if (skip) {
+            if (activity.id > (user.lastActivityId || 0)) user.lastActivityId = activity.id;
+            changed = true;
+            continue;
+          }
           let seasonInfo = null;
           if (activity.__typename === 'ListActivity' && activity.media) {
             seasonInfo = await resolveSeasonInfo(activity.media.id, titleOf(activity.media), activity.media.siteUrl, activity.media.type);
@@ -1880,34 +1873,32 @@ async function pollOnce() {
             entry.count += 1;
             entry.title = seasonInfo.rootTitle;
             entry.siteUrl = seasonInfo.rootSiteUrl;
+            entry.cover = activity.media.coverImage?.large || entry.cover || null;
             data.watchStats[key] = entry;
           }
 
-          const embed = await buildEmbed(user.username, user.avatar, activity, streak, seasonInfo, look);
-          const components = seasonInfo ? buildActivityButtons(seasonInfo.rootId, activity.media.id, 0, 0) : [];
-
-          const sentMessage = await channel.send({
-            content: user.addedBy ? `<@${user.addedBy}>` : undefined,
-            embeds: [embed],
-            components,
-            allowedMentions: user.addedBy ? { users: [user.addedBy] } : { parse: [] },
-            // Quiet ping: shows the mention, no push notification/sound.
-            flags: user.addedBy ? MessageFlags.SuppressNotifications : undefined,
-          });
+          const mentionId = cfg.ping === 'off' ? null : user.addedBy || null;
+          const payload = await buildPostPayload({ username: user.username, activity, seasonInfo, look, ownerId, mentionId, streak, cfg });
+          const sentMessage = await channel.send(payload);
 
           guildData.recentPosts[sentMessage.id] = {
             addedBy: user.addedBy || null,
             anilistId: user.id,
             animeTitle: seasonInfo ? seasonInfo.rootTitle : null,
+            mediaTitle: activity.media ? titleOf(activity.media) : null,
             siteUrl: seasonInfo ? seasonInfo.rootSiteUrl : null,
+            rootId: seasonInfo ? seasonInfo.rootId : null,
             mediaId: activity.media?.id || null,
             cover: activity.media?.coverImage?.large || activity.media?.coverImage?.medium || null,
+            color: payload.components?.[0]?.data?.accent_color ?? null,
+            postedAt: new Date().toISOString(),
             likes: [],
           };
           // Advance per activity, so a failure halfway never re-posts the earlier ones.
-          user.lastActivityId = Math.max(user.lastActivityId || 0, activity.id);
+          if (activity.id > (user.lastActivityId || 0)) user.lastActivityId = activity.id;
           changed = true;
         }
+        advance();
       } catch (e) {
         console.error(`Failed polling ${user.username}:`, e.message);
       }
@@ -1922,7 +1913,7 @@ async function pollOnce() {
   }
 
   if (changed) await saveData(data);
-  await sendMonthlyRecaps(data, soc, st).catch((e) => console.error('Monthly recaps failed:', e.message));
+  await recaps.runScheduled().catch((e) => console.error('Scheduled recaps failed:', e.stack || e.message));
 }
 
 // Settings → Activity posts → "Preview a post": the person's latest real
@@ -1945,49 +1936,17 @@ async function buildActivityPreview(userId, draftUser) {
       status: 'watched episode',
       progress: '5',
       createdAt: Math.floor(Date.now() / 1000),
-      media: { ...m, coverImage: { extraLarge: m.coverImage?.extraLarge, large: m.coverImage?.large, medium: m.coverImage?.large } },
+      media: { ...m, coverImage: { extraLarge: m.coverImage?.extraLarge, large: m.coverImage?.large, medium: m.coverImage?.large, color: m.coverImage?.color } },
     };
+  }
+  if (!activity.media.tags) {
+    const tags = await getMediaTags([activity.media.id]).catch(() => null);
+    if (tags) activity.media.tags = tags.get(activity.media.id);
   }
   const seasonInfo = await resolveSeasonInfo(activity.media.id, titleOf(activity.media), activity.media.siteUrl, activity.media.type);
   const tz = draftUser?.prefs?.timezone || social.DEFAULT_TZ;
   const streak = al ? statsEngine.streakOf(st.users[String(al.id)], tz).current : 3;
-  const username = al?.name || 'you';
-  const embed = await buildEmbed(username, al?.avatar || null, activity, streak, seasonInfo, draftUser);
-  const rows = buildActivityButtons(seasonInfo.rootId, activity.media.id, 0, 0);
-  rows.forEach((r) => r.components.forEach((b) => b.setDisabled(true)));
-  return { embeds: [embed], components: rows };
-}
-
-// People who chose "DM me my recap" get last month's recap during the first
-// week of a new month (so a bot restart on the 1st doesn't skip anyone).
-let lastRecapCheck = 0;
-async function sendMonthlyRecaps(data, soc, st) {
-  if (Date.now() - lastRecapCheck < 60 * 60 * 1000) return; // at most hourly
-  lastRecapCheck = Date.now();
-  let sent = 0;
-  for (const [userId, u] of Object.entries(soc.users)) {
-    if (!u.prefs?.recapDm || sent >= 15) continue;
-    const al = social.anilistFor(data, userId);
-    if (!al) continue;
-    const tz = u.prefs.timezone || social.DEFAULT_TZ;
-    const today = statsEngine.dayKey(new Date(), tz);
-    if (Number(today.slice(8, 10)) > 7) continue;
-    const prev = statsEngine.lastMonths(statsEngine.monthKey(today), 2)[0];
-    if (u.prefs.lastRecapSent === prev) continue;
-    if (!st.users[String(al.id)]?.months?.[prev]?.e) {
-      u.prefs.lastRecapSent = prev; // nothing watched — nothing to send
-      continue;
-    }
-    try {
-      const user = await client.users.fetch(userId);
-      await user.send(await statsUi.recapPayload(userId, userId, prev, { shareable: false }));
-      sent++;
-    } catch (e) {
-      console.error(`Couldn't DM recap to ${userId}:`, e.message);
-    }
-    u.prefs.lastRecapSent = prev;
-  }
-  saveSocial();
+  return buildPostPayload({ username: al?.name || 'you', activity, seasonInfo, look: draftUser, ownerId: userId, mentionId: null, streak, cfg: {}, preview: true });
 }
 
 /* ---------------------------------------------------------------------------
@@ -2014,5 +1973,5 @@ async function sendMonthlyRecaps(data, soc, st) {
 
 // Exposed only so the handlers can be exercised in isolation; unused at runtime.
 module.exports = {
-  _internals: { client, app, dispatchInteraction, buildActivityPreview, sendMonthlyRecaps, handleSlashCommand, handleButton, handleModalSubmit, handleSelectMenu, pollOnce, buildEmbed, resolveSeasonInfo, getFranchiseSeasonIds },
+  _internals: { client, app, dispatchInteraction, buildActivityPreview, buildPostPayload, handleSlashCommand, handleButton, handleModalSubmit, handleSelectMenu, pollOnce, resolveSeasonInfo, getFranchiseSeasonIds, feedHealth },
 };

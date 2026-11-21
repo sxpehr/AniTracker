@@ -201,6 +201,7 @@ function ensureCore(data) {
   if (!data.feedbackStatus) data.feedbackStatus = {};
   if (!Array.isArray(data.bootHistory)) data.bootHistory = [];
   if (typeof data.lastRelaunchNoticeAt !== 'number') data.lastRelaunchNoticeAt = 0;
+  if (!data.feedState) data.feedState = {}; // AniList id -> merged/list-update detection memory (features/feed.js)
   migrateCore(data);
   return data;
 }
@@ -240,7 +241,8 @@ function ensureSocial(data) {
   if (!data || typeof data !== 'object') data = {};
   if (!data.users) data.users = {}; // Discord id -> profile, settings, collections…
   if (!data.reviews) data.reviews = {}; // review id -> review
-  if (!data.guildConfig) data.guildConfig = {}; // guild id -> { leaderboards: {...} }
+  if (!data.guildConfig) data.guildConfig = {}; // guild id -> server settings (see features/serverSettings.js)
+  if (!data.ratings) data.ratings = {}; // Discord id -> { mediaId: { s, at, t, c, u } } quick 1-10 ratings
   if (!data.schemaVersion) data.schemaVersion = 1;
   return data;
 }
@@ -263,6 +265,11 @@ function trimStats(data) {
     if (days.length > MAX_DAY_HISTORY) {
       days.sort();
       for (const d of days.slice(0, days.length - MAX_DAY_HISTORY)) delete u.days[d];
+    }
+    // Per-show breakdowns are only needed for recent weekly recaps.
+    const cutoff = new Date(Date.now() - 75 * 86400000).toISOString().slice(0, 10);
+    for (const [d, v] of Object.entries(u.days || {})) {
+      if (d < cutoff && Array.isArray(v) && v.length > 3) u.days[d] = v.slice(0, 3);
     }
   }
 }

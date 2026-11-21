@@ -66,12 +66,20 @@ async function autocomplete(interaction) {
       const al = social.anilistFor(core, target);
       const tz = social.peekUser(s, target).prefs.timezone;
       const current = engine.monthKey(engine.dayKey(new Date(), tz));
-      const months = new Set([current, ...Object.keys(st.users[String(al?.id)]?.months || {})]);
-      choices = [...months]
+      // Always the last 6 months (no typing needed), plus older months with data.
+      const history = st.users[String(al?.id)]?.months || {};
+      const recent = engine.lastMonths(current, 6).reverse();
+      const older = Object.keys(history)
+        .filter((m) => !recent.includes(m))
         .sort()
-        .reverse()
+        .reverse();
+      choices = [...recent, ...older]
         .slice(0, 25)
-        .map((m) => ({ name: engine.monthName(m), value: m }))
+        .map((m, i) => {
+          const eps = history[m]?.e || 0;
+          const when = i === 0 ? 'This month' : i === 1 ? 'Last month' : null;
+          return { name: `${engine.monthName(m)}${when ? ` · ${when}` : ''}${eps ? ` · ${eps} eps` : ' · nothing logged'}`, value: m };
+        })
         .filter((c) => c.name.toLowerCase().includes(value.toLowerCase()));
     }
   } catch (e) {
@@ -201,7 +209,8 @@ async function handle(interaction) {
     let ym = interaction.options.getString('month');
     if (!/^\d{4}-\d{2}$/.test(ym || '')) ym = engine.monthKey(engine.dayKey(new Date(), tz));
     await interaction.deferReply(priv ? { flags: ui.EPHEMERAL } : {}).catch(() => {});
-    return ctx.respond(interaction, await statsUi.recapPayload(target.id, me, ym, { shareable: priv }));
+    const { personalRecap } = require('./recaps');
+    return ctx.respond(interaction, await personalRecap(target.id, me, ym, { shareable: priv }));
   }
 
   if (name === 'leaderboard') {

@@ -31,11 +31,13 @@ const LAYOUTS = {
 
 const ACTIVITY_FIELDS = {
   description: { label: 'Synopsis', emoji: '📄' },
-  genres: { label: 'Genres', emoji: '🎭' },
+  genres: { label: 'Tags (Isekai, Satire…)', emoji: '🏷️' },
   rating: { label: 'Score', emoji: '⭐' },
   popularity: { label: 'Popularity rank', emoji: '❤️' },
   cover: { label: 'Cover image', emoji: '🖼️' },
   streak: { label: 'Streak counter', emoji: '🔥' },
+  progress: { label: 'Season progress bar', emoji: '📶' },
+  status: { label: 'My profile status', emoji: '💬' },
 };
 const DEFAULT_ACTIVITY_FIELDS = Object.keys(ACTIVITY_FIELDS);
 

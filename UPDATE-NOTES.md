@@ -1,3 +1,61 @@
+# Recaps, modern layout, tags, admin panel & the "not posting" fix
+
+Push and Render deploys it — slash commands sync themselves on startup. Nothing to configure.
+
+## Restore points
+- `backup/pre-nov21-update` — the bot exactly as it was before this batch.
+- `restore/before-user-feedback` — this update, without the user-feedback features (ratings, voters, /watched, freaky board).
+
+To go back to one: `git fetch origin && git reset --hard origin/<branch> && git push --force origin main` (Render redeploys it).
+
+## Activity posts
+- **Modern layout (Components V2).** Banner across the top (AniList's, or one painted from the cover), the cover beside the title, then the details. Your `/settings` style (full / compact / minimal), colour and detail picks still apply.
+- **Removed** Favorite, Watch later and Recommend from posts. Saving still works through 🗂️ **Save** (it lists Favorites and Watch Later too). Buttons now: 🤍 Like · ✍️ Review · 🗂️ Save · 📊 More info.
+- **From the profile:** the owner's **status** (tagline) sits next to their name, and the post shows a **progress bar for the season they're on** ("EPISODE 7 OF 12 · 58%", plus when the next episode airs). Both are new toggles in `/settings` → Activity posts.
+- The quiet ping still works (it's in the footer now: "tracked by @…").
+- Old posts keep working. Clicking Like on one switches it to the new buttons.
+
+## Tags instead of vague genres
+Posts, `/stats`, recaps and More info now show AniList **tags** ranked by relevance (Isekai, Satire, Iyashikei, Time Loop…). Spoiler tags and bland ones ("Male Protagonist", "Shounen", "Episodic") are skipped, and genres only fill gaps. `/anime random` got a **vibe** option with 25 tags. Lifetime stats use your AniList tag stats.
+
+## Recaps
+- **Weekly server recap** every Monday (10am server time, catches up until Wednesday) and **monthly server recap** on the 1st, posted automatically. Most hours (with bars), most episodes, most different anime, most completed, longest streak, most active days, the server favourite with its banner, and the server's top tags. Ties share a medal.
+- **Personal monthly recap by DM** on the 1st for everyone with a linked or tracked AniList (on by default, a "Stop recap DMs" button is in every DM and in `/settings`). Each DM has **Share this recap to a server** (only servers you're in, posted in that server's recap channel) and **Compare with another month**.
+- `/recap` lists the **last 6 months automatically** when you click the month option (with episode counts). Every recap card also has a month picker and a compare menu.
+- Admins choose the recap channel, turn weekly/monthly on or off, set the server time zone, and can **preview** or **post now** in `/serversettings`.
+
+## /serversettings (Manage Server)
+Pages: **Activity feed** (channel picker, quiet ping on/off, status posts, manga, 18+ titles: blur / show / skip) · **Recaps & leaderboards** · **Members** (auto-track people who `/signin` here, who can `/track` others, restart ping + which role) · **Reminders** · **Health check**.
+The **Health check** shows, for any tracked profile, exactly what the bot sees: live activity on/off, signed in or not, channel permissions, the last AniList check (and its error), whether their newest activity was posted, and a **Check AniList now** button that lists their latest activities live.
+
+## The "his AniList updates but nothing posts" bug
+Three causes, all fixed:
+1. **AniList merges activities.** Quick follow-up updates get folded into the same activity ("episodes 3 - 5", same id). With a long *Activity merge time* in AniList settings, every update after the first was a merge, so the bot (which only looked for new ids) never posted. It now remembers each recent activity's progress and posts the new part ("Watched episodes 4 - 5").
+2. **List activity turned off.** AniList lets you disable activity creation per status (Settings → Lists). The list changes, but there's no activity. The poll now also reads the latest list entries (same request) and posts changes that have no activity.
+3. **Signing in didn't track you.** `/signin` only linked the account. Now signing in from a server tracks you there (admins can turn that off), and `/signin` / `/tracking` show a **Post my activity in this server** button when you aren't tracked.
+
+Also: AniList requests now pause when the rate-limit budget is nearly gone instead of collecting 429s, and each poll starts at a different account so the same people aren't always the ones cut off.
+For your friend specifically: have him run `/tracking` in your server. If it says "not tracked in this server", tap the button. Then check `/serversettings` → Health check.
+
+## Top.gg reminder
+After a command or post button there's a **5% chance** of a private card: **Review on Top.gg**, **Ideas or bugs** (opens the feedback form) and **Don't remind me**. At most once every 14 days per person, never on their first day, 4 times max. Individual opt-out is in `/settings` → Stats & reviews, and admins can turn it off for the server.
+
+## Everything else now uses the modern layout
+`/help`, `/list`, `/whostracking`, `/signin`, `/tracking`, `/favorites`, `/recommendanimes`, `/update`, More info (banner, cover, facts, tags, cast gallery), feedback thanks, the welcome message, and every DM (reactions, likes, recommendations, sign-in).
+
+## Limits worth knowing
+- Discord's modern layout has no small inline avatar like the old embed author line, so the post shows the name (linked to AniList) without the round avatar.
+- The progress bar is an image served by the bot (`/bar/...`, already used by profiles). If `PUBLIC_URL`/`RENDER_EXTERNAL_URL` is missing it falls back to a text bar.
+- I couldn't reach AniList or Discord from my environment, so this was tested offline against mocked AniList data and Discord's own component validators (every message checked against the 40-component / 4,000-character limits). Check the 🔲 items below live.
+
+## Check live
+- 🔲 A real activity post (desktop + mobile): banner, cover, progress bar, quiet ping
+- 🔲 `/serversettings` → Recaps → Preview weekly
+- 🔲 Your friend's profile in the Health check
+- 🔲 The first Monday recap and the Dec 1 DMs
+
+---
+
 # Banner compositing, favorites collage, progress bars
 
 - **Avatar baked into every banner:** painted, featured-anime and your own image or GIF. The avatar is a circle with a subtle dark border, overlapping the bottom-left edge, always the same size and position.

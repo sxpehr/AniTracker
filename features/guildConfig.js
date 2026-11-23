@@ -10,7 +10,7 @@ const DEFAULTS = {
   ping: 'quiet', // 'quiet' = silent mention of whoever tracked the profile · 'off' = no mention
   postText: true, // AniList status posts & messages
   postManga: true, // manga / chapter updates
-  mature: 'blur', // 18+ titles: 'show' · 'blur' (cover hidden) · 'skip'
+  mature: 'blur', // 18+ titles: 'show' · 'blur' (cover sent as a spoiler) · 'hide' (no cover) · 'skip'
   burst: 3, // flood protection: separate posts per person per check; the rest are bundled into one
   // Recaps
   recapChannelId: null, // null = same as the activity channel

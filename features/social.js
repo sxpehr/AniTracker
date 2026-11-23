@@ -14,19 +14,20 @@ const SECTIONS = {
   featured: { label: 'Featured anime', emoji: '🎞️', description: 'One anime front and centre' },
   favorites: { label: 'Favorites shelf', emoji: '⭐', description: 'Cover gallery of your favorites' },
   rotation: { label: 'In Rotation', emoji: '🔄', description: "What you're watching, with progress" },
-  opening: { label: 'Favorite opening', emoji: '🎵', description: 'Your favorite anime OP' },
+  opening: { label: 'Favorite openings', emoji: '🎵', description: 'Up to 3 anime OPs' },
+  ending: { label: 'Favorite endings', emoji: '🎶', description: 'Up to 3 anime EDs' },
   review: { label: 'Latest review', emoji: '✍️', description: 'Your newest (or featured) review' },
   recommendations: { label: 'Recommendations', emoji: '💜', description: 'What you recommend' },
   collections: { label: 'Collections', emoji: '🗂️', description: 'Your custom lists' },
 };
-const DEFAULT_SECTIONS = ['bio', 'stats', 'featured', 'favorites', 'rotation', 'opening', 'review'];
+const DEFAULT_SECTIONS = ['bio', 'stats', 'featured', 'favorites', 'rotation', 'opening', 'ending', 'review'];
 
 // Layouts decide the ORDER; the showcase picks decide WHICH sections appear.
 const LAYOUTS = {
-  classic: { label: 'Classic', emoji: '🪪', description: 'About me first, then your anime', order: ['bio', 'stats', 'featured', 'favorites', 'rotation', 'opening', 'review', 'recommendations', 'collections'] },
-  showcase: { label: 'Showcase', emoji: '🖼️', description: 'Lead with your featured anime + favorites', order: ['featured', 'favorites', 'opening', 'bio', 'rotation', 'review', 'stats', 'recommendations', 'collections'] },
-  stats: { label: 'Stats first', emoji: '📈', description: 'Numbers up top for the grinders', order: ['stats', 'rotation', 'bio', 'featured', 'favorites', 'review', 'opening', 'recommendations', 'collections'] },
-  minimal: { label: 'Minimal', emoji: '🤍', description: 'Just the essentials, lots of breathing room', order: ['bio', 'featured', 'favorites', 'opening', 'stats', 'rotation', 'review', 'recommendations', 'collections'] },
+  classic: { label: 'Classic', emoji: '🪪', description: 'About me first, then your anime', order: ['bio', 'stats', 'featured', 'favorites', 'rotation', 'opening', 'ending', 'review', 'recommendations', 'collections'] },
+  showcase: { label: 'Showcase', emoji: '🖼️', description: 'Lead with your featured anime + favorites', order: ['featured', 'favorites', 'opening', 'ending', 'bio', 'rotation', 'review', 'stats', 'recommendations', 'collections'] },
+  stats: { label: 'Stats first', emoji: '📈', description: 'Numbers up top for the grinders', order: ['stats', 'rotation', 'bio', 'featured', 'favorites', 'review', 'opening', 'ending', 'recommendations', 'collections'] },
+  minimal: { label: 'Minimal', emoji: '🤍', description: 'Just the essentials, lots of breathing room', order: ['bio', 'featured', 'favorites', 'opening', 'ending', 'stats', 'rotation', 'review', 'recommendations', 'collections'] },
 };
 
 const ACTIVITY_FIELDS = {
@@ -92,7 +93,10 @@ function defaults() {
       tagline: null,
       bio: null,
       featured: null,
-      opening: null,
+      opening: null, // first of `openings` (kept for older code)
+      openings: [],
+      endings: [],
+      favBorder: 'anime', // favorites card border: 'anime' (each show's colour) · 'theme'
       layout: 'classic',
       sections: [...DEFAULT_SECTIONS],
       featuredReviewId: null,
@@ -236,7 +240,26 @@ function reviewFor(social, userId, mediaId) {
   return Object.values(social.reviews).find((r) => r.authorId === userId && r.mediaId === mediaId) || null;
 }
 
+// Favorite openings / endings (older profiles stored a single `opening`).
+const MAX_SONGS = 3;
+function songsOf(profile, kind) {
+  if (kind === 'ED') return Array.isArray(profile?.endings) ? profile.endings : [];
+  if (Array.isArray(profile?.openings) && profile.openings.length) return profile.openings;
+  return profile?.opening ? [profile.opening] : [];
+}
+function setSongs(profile, kind, list) {
+  const clean = list.filter(Boolean).slice(0, MAX_SONGS);
+  if (kind === 'ED') profile.endings = clean;
+  else {
+    profile.openings = clean;
+    profile.opening = clean[0] || null;
+  }
+}
+
 module.exports = {
+  songsOf,
+  setSongs,
+  MAX_SONGS,
   BADGES,
   badgesFor,
   SECTIONS,

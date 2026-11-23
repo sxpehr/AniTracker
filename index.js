@@ -1762,10 +1762,26 @@ async function coverColor(media) {
   return getDominantColor(cover.medium || cover.large || cover.extraLarge);
 }
 
-async function buildPostPayload({ username, avatarUrl = null, activity, seasonInfo, look, ownerId, mentionId, streak, cfg, guildId = null, likeCount = 0, preview = false }) {
+async function buildPostPayload({ username, avatarUrl = null, activity, seasonInfo, look, ownerId, mentionId, streak, cfg, guildId = null, likeCount = 0, preview = false, discordId = null }) {
   const color = activity.media ? await coverColor(activity.media).catch(() => DEFAULT_COLOR) : DEFAULT_COLOR;
   const extra = postExtras ? await postExtras({ activity, seasonInfo, cfg, guildId }).catch(() => ({})) : {};
-  return activityPost.buildActivityPost({ username, avatarUrl, activity, streak, seasonInfo, look, ownerId, mentionId, color, cfg, likeCount, preview, rateLabel: POST_RATE_BUTTON, ...extra });
+  // Their Discord @handle for the author line.
+  const who = discordId || ownerId || mentionId;
+  const discordUser = who ? client.users.cache.get(who) || (await client.users.fetch(who).catch(() => null)) : null;
+  const { spoilerUrl, ...payload } = activityPost.buildActivityPost({ username, avatarUrl, activity, streak, seasonInfo, look, ownerId, mentionId, color, cfg, likeCount, preview, rateLabel: POST_RATE_BUTTON, discordName: discordUser?.username || null, ...extra });
+  // 18+ cover as a Discord spoiler (click to reveal), attached to the message.
+  if (spoilerUrl) {
+    try {
+      const res = await fetch(spoilerUrl, { signal: AbortSignal.timeout(8000) });
+      if (res.ok) {
+        const ext = (spoilerUrl.match(/\.(png|jpe?g|gif|webp)(?:$|\?)/i)?.[1] || 'jpg').toLowerCase();
+        payload.files = [{ attachment: Buffer.from(await res.arrayBuffer()), name: `SPOILER_cover.${ext}` }];
+      }
+    } catch (e) {
+      console.warn('Spoiler cover download failed:', e.message);
+    }
+  }
+  return payload;
 }
 // Extra post details: the server's community rating ("👥 8.3 here (4)").
 const postExtras = (args) => ratings.postExtras(args);
@@ -1971,7 +1987,7 @@ async function pollOnce() {
             data.watchStats[key] = entry;
           }
 
-          const { accent, ...payload } = await buildPostPayload({ username: user.username, avatarUrl: user.avatar, activity, seasonInfo, look, ownerId, mentionId, streak, cfg, guildId });
+          const { accent, ...payload } = await buildPostPayload({ username: user.username, avatarUrl: user.avatar, activity, seasonInfo, look, ownerId, mentionId, streak, cfg, guildId, discordId: ownerId || user.addedBy || null });
           const sentMessage = await channel.send(payload);
           sentThisCheck++;
           flood.remember(guildData.postKeys, user.id, [activity]);
@@ -2042,7 +2058,7 @@ async function buildActivityPreview(userId, draftUser) {
   const tz = draftUser?.prefs?.timezone || social.DEFAULT_TZ;
   const streak = al ? statsEngine.streakOf(st.users[String(al.id)], tz).current : 3;
   const avatarUrl = al ? data.linkedAccounts[userId]?.avatar || null : null;
-  const { accent, ...payload } = await buildPostPayload({ username: al?.name || 'you', avatarUrl, activity, seasonInfo, look: draftUser, ownerId: userId, mentionId: null, streak, cfg: {}, preview: true });
+  const { accent, ...payload } = await buildPostPayload({ username: al?.name || 'you', avatarUrl, activity, seasonInfo, look: draftUser, ownerId: userId, mentionId: null, streak, cfg: {}, preview: true, discordId: userId });
   return payload;
 }
 

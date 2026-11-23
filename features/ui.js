@@ -70,7 +70,7 @@ function gallery(items) {
   return new MediaGalleryBuilder().addItems(
     ...valid.map((i) => {
       const item = new MediaGalleryItemBuilder().setURL(hd(i.url));
-      if (i.description) item.setDescription(String(i.description).slice(0, 256));
+      // No alt text: Discord shows an "ALT" badge on every image that has one.
       if (i.spoiler) item.setSpoiler(true);
       return item;
     })

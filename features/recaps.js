@@ -28,7 +28,6 @@ const { publicUrl } = require('./themes');
  *   rx:me:stats · rx:me:recap:<ym> · rx:lb      buttons on server recaps
  * ------------------------------------------------------------------------- */
 
-const MEDALS = ['🥇', '🥈', '🥉'];
 const WEEKLY_ACCENT = 0x3db4f2;
 const MONTHLY_ACCENT = 0xf5a524;
 const MAX_DMS_PER_RUN = 20;
@@ -105,7 +104,7 @@ function periodTitle(kind, key) {
   return engine.monthName(key);
 }
 
-// Medal per place, with ties sharing a medal (two people on 7 days both get 🥇).
+// Place per person, with ties sharing a place (two people on 7 days are both 1st).
 function placed(sorted, value) {
   let place = 0;
   return sorted.map((r, i) => {
@@ -114,11 +113,12 @@ function placed(sorted, value) {
   });
 }
 
-function podium(rows, value, fmt) {
+// Top 3 for one category as a clean numbered list (ties share a number).
+function podium(rows, value, unit) {
   const sorted = rows.filter((r) => value(r) > 0).sort((a, b) => value(b) - value(a));
   const top = placed(sorted, value).filter((x) => x.place < 3).slice(0, 4);
   if (!top.length) return null;
-  return top.map(({ r, place }) => `${MEDALS[place]} ${who(r.p)} ${fmt(value(r))}`).join('  ·  ');
+  return top.map(({ r, place }) => `\`${place + 1}\`  ${who(r.p)}  **${ui.num(value(r))}** ${unit(value(r))}`).join('\n');
 }
 
 function isFreakyMedia(st, id) {
@@ -232,7 +232,7 @@ async function serverRecapPayload(guildId, kind, key, { preview = false } = {}) 
           .slice(0, 5)
           .map(
             ({ r, place }) =>
-              `${MEDALS[place] || `\`#${place + 1}\``} ${who(r.p)}  ·  **${ui.hours(r.sum.minutes)} h**\n-# \`${ui.bar(r.sum.minutes, maxMin, 14)}\`  ${ui.num(r.sum.episodes)} eps · ${r.sum.animeCount} anime${r.sum.completed ? ` · ${r.sum.completed} completed` : ''}`
+              `\`${place + 1}\`  ${who(r.p)}  ·  **${ui.hours(r.sum.minutes)} h**\n-# \`${ui.bar(r.sum.minutes, maxMin, 14)}\`  ${ui.num(r.sum.episodes)} eps · ${r.sum.animeCount} anime${r.sum.completed ? ` · ${r.sum.completed} completed` : ''}`
           )
           .join('\n')}${byHours.length > 5 ? `\n-# +${byHours.length - 5} more watching` : ''}`
       )
@@ -241,14 +241,15 @@ async function serverRecapPayload(guildId, kind, key, { preview = false } = {}) 
   children.push(ui.divider());
 
   // Category podiums.
+  const plural = (one, many) => (v) => (v === 1 ? one : many);
   const boards = [
-    ['📺 Most episodes', podium(rows, (r) => r.sum.episodes, (v) => `**${ui.num(v)}**`)],
-    ['🎬 Most different anime', podium(rows, (r) => r.sum.animeCount, (v) => `**${v}**`)],
-    ['✅ Most completed', podium(rows, (r) => r.sum.completed || 0, (v) => `**${v}**`)],
-    ['🔥 Longest streak', podium(rows, (r) => r.sum.longestStreak || 0, (v) => `**${v}**d`)],
-    ['📅 Most active days', podium(rows, (r) => r.sum.activeDays || 0, (v) => `**${v}**`)],
-  ].filter(([, line]) => line);
-  children.push(ui.text(boards.map(([t, line]) => `**${t}**\n${line}`).join('\n')));
+    ['Most episodes', podium(rows, (r) => r.sum.episodes, plural('episode', 'episodes'))],
+    ['Most different anime', podium(rows, (r) => r.sum.animeCount, plural('anime', 'anime'))],
+    ['Most completed', podium(rows, (r) => r.sum.completed || 0, plural('completed', 'completed'))],
+    ['Longest streak', podium(rows, (r) => r.sum.longestStreak || 0, plural('day', 'days'))],
+    ['Most active days', podium(rows, (r) => r.sum.activeDays || 0, plural('day', 'days'))],
+  ].filter(([, list]) => list);
+  if (boards.length) children.push(ui.text(boards.map(([t, list]) => `**${t}**\n${list}`).join('\n\n')));
 
   if (fav) {
     children.push(ui.divider());
@@ -323,7 +324,9 @@ async function serverRecapPayload(guildId, kind, key, { preview = false } = {}) 
   buttons.push(ui.button('rx:lb', 'Leaderboards', { emoji: '🏆' }));
   children.push(ui.actionRow(buttons));
   children.push(ui.text(`-# ${weekly ? 'Posts every Monday' : 'Posts on the 1st'} · your own recap: /recap · admins: /serversettings`));
-  return ui.fit([ui.card(accent, children)]);
+  const payload = ui.fit([ui.card(accent, children)]);
+  await require('./artRoutes').warmPayload(payload);
+  return payload;
 }
 
 async function recapChannelFor(core, s, guildId) {

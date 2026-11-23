@@ -4,8 +4,9 @@ const engine = require('./statsEngine');
 const collections = require('./collections');
 const reviews = require('./reviews');
 const statsUi = require('./statsUi');
-const { paletteFor, bannerUrlFor, headerUrlFor, hdCover, collageUrl, warmHeader } = require('./themes');
-const { getMediaLite, getProfileSnapshot } = require('./anilistSocial');
+const { paletteFor, bannerUrlFor, headerUrlFor, collageUrl, warmHeader } = require('./themes');
+const { getMediaLite, getMediaBatch, getProfileSnapshot } = require('./anilistSocial');
+const { pickTags } = require('./tags');
 const { ctx } = require('./ctx');
 const artRoutes = require('./artRoutes');
 const { getRecentActivities } = require('../anilist');
@@ -103,30 +104,34 @@ const parts = {
     return [statsStrip(d)];
   },
 
-  // Featured anime: its banner, then cover art beside a prominent title.
-  featured: ({ u, featuredBanner }) => {
+  // Featured anime: a big banner, the title, tags and the note (no cover icon).
+  featured: ({ u, featuredBanner, featuredMedia }) => {
     const f = u.profile.featured;
     if (!f) return [];
     const meta = [f.year, f.format && f.format.replace('_', ' '), f.episodes ? `${f.episodes} episodes` : null].filter(Boolean).join('  ·  ');
     const out = [ui.text(ui.label('✦ Featured'))];
     // skip the banner here if the whole profile header already uses it
-    if (featuredBanner && u.profile.bannerMode !== 'featured') {
-      const g = ui.gallery([{ url: featuredBanner, description: `${f.title} banner` }]);
+    if (u.profile.bannerMode !== 'featured') {
+      const g = ui.gallery([{ url: artRoutes.featuredUrl(f.mediaId) || featuredBanner }]);
       if (g) out.push(g);
     }
+    const tags = pickTags(featuredMedia?.tags, featuredMedia?.genres || f.genres, 5);
     const lines = [`## [${ui.esc(ui.clip(f.title, 70))}](${f.siteUrl})`];
     if (meta) lines.push(`-# ${meta}`);
-    if (f.note) lines.push(`> ${ui.softEsc(ui.clip(f.note, 200))}`);
-    out.push(ui.row(lines.slice(0, 3), hdCover(f.cover)));
+    if (tags.length) lines.push(tags.map((t) => `\`${ui.esc(t)}\``).join(' '));
+    if (f.note) lines.push(`> ### ${ui.softEsc(ui.clip(f.note.replace(/\s+/g, ' '), 200))}`);
+    out.push(ui.text(lines.join('\n')));
     return out;
   },
 
-  // Favorites: a small cinematic collage of up to three banners, no text.
-  favorites: ({ u }) => {
+  // Favorites: up to three banner cards with titles (one image).
+  favorites: ({ u, pal }) => {
     if (!u.favorites.length) return [];
-    const url = collageUrl(u.favorites.slice(0, 3).map((e) => e.mediaId));
-    const out = [ui.text(ui.label(`Favorites · ${u.favorites.length}`))];
-    const g = url ? ui.gallery([{ url, description: u.favorites.slice(0, 3).map((e) => e.title).join(' · ') }]) : ui.coverGallery(u.favorites.slice(0, 4).map((e) => ({ url: e.cover, description: e.title })), { single: 'row' });
+    const border = u.profile.favBorder === 'theme' ? pal.accent : null;
+    const url = artRoutes.favoritesUrl(u.favorites.slice(0, 3).map((e) => e.mediaId), u.favorites.length, border) || collageUrl(u.favorites.slice(0, 3).map((e) => e.mediaId));
+    const g = url ? ui.gallery([{ url }]) : ui.coverGallery(u.favorites.slice(0, 4).map((e) => ({ url: e.cover, description: e.title })), { single: 'row' });
+    // The new card has "FAVORITES · n" painted in; older fallbacks need the label.
+    const out = artRoutes.enabled() ? [] : [ui.text(ui.label(`Favorites · ${u.favorites.length}`))];
     if (g) out.push(g);
     return out;
   },
@@ -137,27 +142,15 @@ const parts = {
     if (!rotation?.length) return [];
     const top = rotation.slice(0, artRoutes.ROTATION_CARDS);
     const url = artRoutes.rotationUrl(top);
-    const g = url ? ui.gallery([{ url, description: top.map((e) => e.title).join(' · ') }]) : null;
+    const g = url ? ui.gallery([{ url }]) : null;
     const out = [ui.text(`${ui.label(`In Rotation · ${rotation.length}`)}${rotation.length > top.length ? `\n-# +${rotation.length - top.length} more in Collections → In Rotation` : ''}`)];
-    if (g) {
-      artRoutes.warm(url);
-      out.push(g);
-    } else out.push(...collections.rotationRows(rotation.slice(0, 2), pal.accent));
+    if (g) out.push(g);
+    else out.push(...collections.rotationRows(rotation.slice(0, 2), pal.accent));
     return out;
   },
 
-  opening: ({ u }) => {
-    const o = u.profile.opening;
-    if (!o) return [];
-    const who = o.artists?.length ? ` — ${ui.esc(ui.clip(o.artists.join(', '), 60))}` : '';
-    const link = o.videoUrl || o.pageUrl || `https://www.youtube.com/results?search_query=${encodeURIComponent(`${o.animeTitle} ${o.slug} ${o.song || ''}`)}`;
-    return [
-      ui.row(
-        [ui.label('Favorite opening'), `### 🎵 ${ui.esc(ui.clip(o.song || o.slug, 70))}${who}`, `-# ${ui.esc(ui.clip(o.animeTitle, 60))} · ${o.slug}${o.episodes ? ` · eps ${o.episodes}` : ''}`],
-        ui.linkButton(link, 'Play', '▶️')
-      ),
-    ];
-  },
+  opening: ({ u }) => songBlocks(u, 'OP'),
+  ending: ({ u }) => songBlocks(u, 'ED'),
 
   review: ({ s, u, ownerId, viewerId }) => {
     if (!social.canView(u, viewerId, ownerId, 'reviews')) return [];
@@ -192,6 +185,22 @@ const parts = {
   },
 };
 
+// Favorite openings / endings: one card image (cover, song, artist, anime,
+// OP badge) and a play button per song underneath.
+function songLink(o) {
+  return o.videoUrl || o.pageUrl || `https://www.youtube.com/results?search_query=${encodeURIComponent(`${o.animeTitle} ${o.slug} ${o.song || ''}`)}`;
+}
+function songBlocks(u, kind) {
+  const list = social.songsOf(u.profile, kind).slice(0, social.MAX_SONGS);
+  if (!list.length) return [];
+  const url = artRoutes.songsUrl(kind, list);
+  const buttons = ui.actionRow(list.map((o) => ui.linkButton(songLink(o), ui.clip(`${o.slug.replace(/^(OP|ED)(\d+)/i, '$1 $2')} · ${o.song || 'Play'}`, 80), '▶️')));
+  if (url) return [ui.gallery([{ url }]), buttons].filter(Boolean);
+  const word = kind === 'ED' ? 'ending' : 'opening';
+  const lines = list.map((o) => `**${ui.esc(ui.clip(o.song || o.slug, 70))}**${o.artists?.length ? ` — ${ui.esc(ui.clip(o.artists.join(', '), 50))}` : ''}\n-# ${ui.esc(ui.clip(o.animeTitle, 60))} · ${o.slug}`);
+  return [ui.text(`${ui.label(`Favorite ${word}${list.length > 1 ? 's' : ''}`)}\n${lines.join('\n')}`), buttons].filter(Boolean);
+}
+
 async function overviewBlocks(d) {
   const { u, own } = d;
   const order = (social.LAYOUTS[u.profile.layout] || social.LAYOUTS.classic).order;
@@ -215,7 +224,7 @@ async function overviewBlocks(d) {
   }
   if (own && !social.isCustomized(u)) {
     blocks.push(ui.divider());
-    blocks.push(ui.text('### ✨ Make this profile yours\n-# Run **/settings** to pick a theme and banner, feature an anime, set your favorite opening and choose what shows here.'));
+    blocks.push(ui.text('### ✨ Make this profile yours\n-# Run **/settings** to pick a theme and banner, feature an anime, set your favorite openings and endings, and choose what shows here.'));
   } else if (!blocks.length) {
     blocks.push(ui.text(own ? '*Your profile is empty — add favorites, a featured anime or a bio in `/settings`.*' : '*Nothing to show here yet.*'));
   }
@@ -360,11 +369,13 @@ async function renderProfile({ ownerId, viewerId, tab = 'overview', page = 0, us
   // Featured anime banner (older saves don't have it stored — look it up).
   let featuredBanner = null;
   const f = u.profile.featured;
+  let featuredMedia = null;
   if (tab === 'overview' && f && u.profile.sections.includes('featured')) {
-    featuredBanner = f.banner || (await getMediaLite(f.mediaId).catch(() => null))?.bannerImage || null;
+    featuredMedia = (await getMediaBatch([f.mediaId]).catch(() => new Map())).get(Number(f.mediaId)) || null;
+    featuredBanner = f.banner || featuredMedia?.bannerImage || (await getMediaLite(f.mediaId).catch(() => null))?.bannerImage || null;
   }
   const su = al ? st.users[String(al.id)] : null;
-  const d = { core, s, st, u, own, ownerId, viewerId, pal, user, al, snap, su, tz: u.prefs.timezone || social.DEFAULT_TZ, rotation, featuredBanner };
+  const d = { core, s, st, u, own, ownerId, viewerId, pal, user, al, snap, su, tz: u.prefs.timezone || social.DEFAULT_TZ, rotation, featuredBanner, featuredMedia };
 
   const children = [];
   if (notice) children.push(ui.text(notice));
@@ -385,7 +396,11 @@ async function renderProfile({ ownerId, viewerId, tab = 'overview', page = 0, us
   }
   children.push(ui.divider());
   children.push(...navRows(ownerId, tab));
-  return ui.fit([ui.card(pal.accent, children)]);
+  const payload = ui.fit([ui.card(pal.accent, children)]);
+  // Paint the cards before Discord asks for them (and retry any cover that
+  // failed), so no image shows up blank.
+  await artRoutes.warmPayload(payload, 6000);
+  return payload;
 }
 
 /* -------------------------------- handlers -------------------------------- */
@@ -408,7 +423,8 @@ async function showView(interaction, payload) {
   const isPublic = interaction.message && !interaction.message.flags?.has?.(ui.EPHEMERAL);
   try {
     if (isPublic && invoker && invoker !== interaction.user.id) {
-      await interaction.reply({ ...(await payload()), flags: ui.V2 | ui.EPHEMERAL });
+      await interaction.deferReply({ flags: ui.EPHEMERAL });
+      await interaction.editReply(await payload());
     } else {
       await interaction.deferUpdate();
       await interaction.editReply(await payload());

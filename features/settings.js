@@ -26,12 +26,13 @@ const statsUi = require('./statsUi');
  * ids: s:open · s:cat · s:theme · s:banner · s:sections · s:layout · s:feat
  *      s:style · s:color · s:show · s:auto · s:vis · s:hide · s:tz · s:recap
  *      s:spoil · s:lb · s:save · s:discard · s:preview · s:postpreview
- *      s:edit:<text|color|bannerurl|featnote|opmanual> · s:op:<mediaId>
+ *      s:edit:<text|color|bannerurl|featnote|opmanual> · s:op|ed:<mediaId> ·
+ *      s:picksong:<OP|ED> · s:songrm:<OP|ED> · s:favborder
  * ------------------------------------------------------------------------- */
 
 const CATEGORIES = {
   look: { label: 'Appearance', emoji: '🎨', description: 'Theme, colours and banner' },
-  profile: { label: 'Profile', emoji: '👤', description: 'Name, tagline, bio, featured anime, opening' },
+  profile: { label: 'Profile', emoji: '👤', description: 'Name, tagline, bio, featured anime, openings & endings' },
   showcase: { label: 'Showcase', emoji: '🧩', description: 'Choose what your profile shows, and the layout' },
   activity: { label: 'Activity posts', emoji: '📡', description: 'How your watch updates look in servers' },
   privacy: { label: 'Privacy', emoji: '🔒', description: 'Who can see what' },
@@ -124,6 +125,13 @@ async function panelBlocks(userId, d, interaction) {
         Object.entries(modes).map(([k, [l, e, desc]]) => ({ label: l, value: k, emoji: e, description: desc, default: (p.bannerMode || 'theme') === k }))
       )
     );
+    blocks.push(ui.text(ui.label('Favorites border')));
+    blocks.push(
+      ui.select('s:favborder', 'Favorites border colour…', [
+        { label: 'Each anime’s own colour', value: 'anime', emoji: '🌈', description: 'Every card glows in its show’s colour (default)', default: (p.favBorder || 'anime') === 'anime' },
+        { label: 'My theme colour', value: 'theme', emoji: '🎨', description: `All cards in your accent ${hex(pal.accent)}`, default: p.favBorder === 'theme' },
+      ])
+    );
     if (p.bannerMode === 'url') blocks.push(rowItem('Banner image', p.bannerUrl ? `-# ${ui.esc(ui.clip(p.bannerUrl, 90))}` : '-# Paste an https image link', 's:edit:bannerurl', 'Set link', '🔗'));
     if (p.bannerMode === 'featured' && !p.featured) blocks.push(ui.text('-# ⚠️ Pick a featured anime in **Profile** first — until then the theme banner is used.'));
   }
@@ -150,16 +158,25 @@ async function panelBlocks(userId, d, interaction) {
         ...(f ? [{ label: 'Remove featured anime', value: '_none', emoji: '✖️' }] : []),
       ])
     );
-    const o = p.opening;
-    blocks.push(
-      rowItem(
-        'Favorite opening',
-        o ? `-# 🎵 **${ui.esc(o.song || o.slug)}**${o.artists?.length ? ` — ${ui.esc(o.artists.join(', '))}` : ''} · ${ui.esc(ui.clip(o.animeTitle, 40))} ${o.slug}` : '-# Pick the OP you could listen to forever',
-        's:pickop',
-        o ? 'Change' : 'Choose',
-        '🎵'
-      )
-    );
+    // Favorite openings / endings: up to 3 each.
+    for (const kind of ['OP', 'ED']) {
+      const list = social.songsOf(p, kind);
+      const word = kind === 'OP' ? 'opening' : 'ending';
+      const lines = list.length
+        ? list.map((o) => `-# ${kind === 'OP' ? '🎵' : '🎶'} **${ui.esc(o.song || o.slug)}**${o.artists?.length ? ` — ${ui.esc(o.artists.join(', '))}` : ''} · ${ui.esc(ui.clip(o.animeTitle, 40))} ${o.slug}`).join('\n')
+        : `-# Pick the ${kind === 'OP' ? 'OP' : 'ED'} you could listen to forever (up to ${social.MAX_SONGS})`;
+      const full = list.length >= social.MAX_SONGS;
+      blocks.push(rowItem(`Favorite ${word}s · ${list.length}/${social.MAX_SONGS}`, lines, full ? `s:songfull:${kind}` : `s:picksong:${kind}`, full ? 'Full' : 'Add', kind === 'OP' ? '🎵' : '🎶'));
+      if (list.length) {
+        blocks.push(
+          ui.select(
+            `s:songrm:${kind}`,
+            `Remove a favorite ${word}…`,
+            list.map((o, i) => ({ label: ui.clip(`${o.slug} · ${o.song || 'Untitled'}`, 100), value: String(i), emoji: '✖️', description: ui.clip(o.animeTitle || '', 100) }))
+          )
+        );
+      }
+    }
   }
 
   if (cat === 'showcase') {
@@ -322,7 +339,10 @@ async function previewCard(userId, d) {
   } else children.push(ui.row([lines[0], lines.slice(1, -1).join('\n') || null, lines[lines.length - 1]].filter(Boolean), user?.displayAvatarURL?.({ size: 512, extension: 'png' })));
   const f = u.profile.featured;
   if (f && u.profile.sections.includes('featured')) children.push(ui.row([ui.label('Featured'), `**${ui.esc(f.title)}**`], f.cover));
-  if (u.profile.opening && u.profile.sections.includes('opening')) children.push(ui.text(`-# 🎵 ${ui.esc(u.profile.opening.song || u.profile.opening.slug)} · ${ui.esc(u.profile.opening.animeTitle)}`));
+  for (const [kind, section, emoji] of [['OP', 'opening', '🎵'], ['ED', 'ending', '🎶']]) {
+    const list = social.songsOf(u.profile, kind);
+    if (list.length && u.profile.sections.includes(section)) children.push(ui.text(list.map((o) => `-# ${emoji} ${ui.esc(o.song || o.slug)} · ${ui.esc(o.animeTitle)}`).join('\n')));
+  }
   return ui.card(pal.accent, children);
 }
 
@@ -432,20 +452,29 @@ function featNoteModal(p) {
     .addLabelComponents(new LabelBuilder().setLabel('Note').setDescription('Leave empty for no note').setTextInputComponent(t));
 }
 
-function openingManualModal(mediaId, animeTitle) {
+// Add (or replace the same song) and make sure the section shows.
+function addSong(p, kind, song) {
+  const list = social.songsOf(p, kind).filter((x) => !(x.mediaId === song.mediaId && x.slug === song.slug));
+  list.push(song);
+  social.setSongs(p, kind, list);
+  const section = kind === 'ED' ? 'ending' : 'opening';
+  if (!p.sections.includes(section)) p.sections.push(section);
+}
+
+function openingManualModal(mediaId, animeTitle, kind = 'OP') {
   const song = new TextInputBuilder().setCustomId('song').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true).setPlaceholder('e.g. unravel');
   const artist = new TextInputBuilder().setCustomId('artist').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(false).setPlaceholder('e.g. TK from Ling tosite sigure');
   const slug = new StringSelectMenuBuilder()
     .setCustomId('slug')
     .setRequired(true)
-    .addOptions(Array.from({ length: 10 }, (_, i) => ({ label: `Opening ${i + 1}`, value: `OP${i + 1}`, default: i === 0 })));
+    .addOptions(Array.from({ length: 10 }, (_, i) => ({ label: `${kind === 'ED' ? 'Ending' : 'Opening'} ${i + 1}`, value: `${kind}${i + 1}`, default: i === 0 })));
   return new ModalBuilder()
-    .setCustomId(`s:m:opmanual:${mediaId}`)
-    .setTitle(ui.clip(`Opening · ${animeTitle || 'anime'}`, 45))
+    .setCustomId(`s:m:opmanual:${mediaId}:${kind}`)
+    .setTitle(ui.clip(`${kind === 'ED' ? 'Ending' : 'Opening'} · ${animeTitle || 'anime'}`, 45))
     .addLabelComponents(
       new LabelBuilder().setLabel('Song title').setTextInputComponent(song),
       new LabelBuilder().setLabel('Artist').setDescription('Optional').setTextInputComponent(artist),
-      new LabelBuilder().setLabel('Which opening').setStringSelectMenuComponent(slug)
+      new LabelBuilder().setLabel(kind === 'ED' ? 'Which ending' : 'Which opening').setStringSelectMenuComponent(slug)
     );
 }
 
@@ -520,19 +549,38 @@ async function onComponent(interaction) {
       changed(d);
       break;
     }
-    case 'pickop':
-      return picker.openSearch(interaction, 'op', '-', { title: 'Favorite opening — which anime?' });
-    case 'op': {
-      // s:op:<mediaId> — chose an opening from the AnimeThemes list
+    case 'favborder':
+      p.favBorder = v[0] === 'theme' ? 'theme' : 'anime';
+      changed(d);
+      break;
+    case 'pickop': // older panels
+    case 'picksong': {
+      const kind = id.split(':')[2] === 'ED' ? 'ED' : 'OP';
+      if (social.songsOf(p, kind).length >= social.MAX_SONGS) return respondPanel(interaction, `⚠️ You already have ${social.MAX_SONGS} — remove one first.`);
+      return picker.openSearch(interaction, kind === 'ED' ? 'ed' : 'op', '-', { title: kind === 'ED' ? 'Favorite ending — which anime?' : 'Favorite opening — which anime?' });
+    }
+    case 'songfull':
+      return respondPanel(interaction, `⚠️ That’s ${social.MAX_SONGS} already — remove one with the menu below it first.`);
+    case 'songrm': {
+      const kind = id.split(':')[2] === 'ED' ? 'ED' : 'OP';
+      const list = social.songsOf(p, kind).slice();
+      list.splice(parseInt(v[0], 10), 1);
+      social.setSongs(p, kind, list);
+      changed(d);
+      break;
+    }
+    case 'op':
+    case 'ed': {
+      // s:op:<mediaId> / s:ed:<mediaId> — chose a song from the AnimeThemes list
+      const kind = key === 'ed' ? 'ED' : 'OP';
       const mediaId = parseInt(id.split(':')[2], 10);
       if (v[0] === '_manual') {
         const anime = d.pendingOpening?.animeTitle;
-        return interaction.showModal(openingManualModal(mediaId, anime));
+        return interaction.showModal(openingManualModal(mediaId, anime, kind));
       }
       const op = (d.pendingOpening?.list || []).find((o) => o.slug === v[0]);
       if (op) {
-        p.opening = { mediaId, animeTitle: d.pendingOpening.animeTitle, cover: d.pendingOpening.cover, ...op };
-        if (!p.sections.includes('opening')) p.sections.push('opening');
+        addSong(p, kind, { mediaId, animeTitle: d.pendingOpening.animeTitle, cover: d.pendingOpening.cover, ...op });
         changed(d);
       }
       d.pendingOpening = null;
@@ -686,13 +734,14 @@ async function onModal(interaction) {
   }
   if (what === 'opmanual') {
     const mediaId = parseInt(parts[3], 10);
-    let slug = 'OP1';
+    const kind = parts[4] === 'ED' ? 'ED' : 'OP';
+    let slug = `${kind}1`;
     try {
-      slug = interaction.fields.getStringSelectValues('slug')?.[0] || 'OP1';
+      slug = interaction.fields.getStringSelectValues('slug')?.[0] || slug;
     } catch {
       /* default */
     }
-    p.opening = {
+    addSong(p, kind, {
       mediaId,
       animeTitle: d.pendingOpening?.animeTitle || 'Anime',
       cover: d.pendingOpening?.cover || null,
@@ -701,8 +750,7 @@ async function onModal(interaction) {
       artists: [interaction.fields.getTextInputValue('artist').trim()].filter(Boolean),
       videoUrl: null,
       pageUrl: null,
-    };
-    if (!p.sections.includes('opening')) p.sections.push('opening');
+    });
     d.pendingOpening = null;
     d.cat = 'profile';
     changed(d);
@@ -727,42 +775,49 @@ picker.registerPurpose('feat', {
   },
 });
 
-picker.registerPurpose('op', {
-  title: 'Favorite opening — which anime?',
-  async onPick(interaction, media) {
-    const d = await getDraft(interaction.user.id);
-    let list = [];
-    try {
-      list = await getOpenings(media.id);
-    } catch (e) {
-      console.error('AnimeThemes lookup failed:', e.message);
-    }
-    d.pendingOpening = { mediaId: media.id, animeTitle: titleOf(media), cover: media.coverImage?.large || null, list };
-    const options = [
-      ...list.slice(0, 24).map((o) => ({
-        label: ui.clip(`${o.slug} · ${o.song}`, 100),
-        value: o.slug,
-        emoji: '🎵',
-        description: ui.clip([o.artists.join(', '), o.episodes ? `eps ${o.episodes}` : null].filter(Boolean).join(' · ') || 'AnimeThemes', 100),
-      })),
-      { label: 'Not listed — type it in', value: '_manual', emoji: '⌨️' },
-    ];
-    const children = [
-      ui.row([`### 🎵 Openings · ${ui.esc(titleOf(media))}`, list.length ? `-# ${list.length} opening${list.length === 1 ? '' : 's'} found on AnimeThemes — pick your favorite` : '-# No openings found on AnimeThemes — type it in instead'], media.coverImage?.large),
-      ui.select(`s:op:${media.id}`, 'Pick the opening…', options),
-      ui.actionRow(ui.button('s:open:back', 'Back to settings', { emoji: '↩️' })),
-    ];
-    const payload = ui.fit([ui.card(ui.ANILIST_BLUE, children)]);
-    try {
-      if (interaction.deferred || interaction.replied) await interaction.editReply(payload);
-      else await interaction.update(payload);
-    } catch (e) {
-      console.error('Opening list failed:', e.message);
-    }
-  },
-  async onCancel(interaction) {
-    return respondPanel(interaction);
-  },
-});
+function songPurpose(kind) {
+  const word = kind === 'ED' ? 'ending' : 'opening';
+  return {
+    title: `Favorite ${word} — which anime?`,
+    async onPick(interaction, media) {
+      const d = await getDraft(interaction.user.id);
+      let list = [];
+      try {
+        list = await getOpenings(media.id, kind);
+      } catch (e) {
+        console.error('AnimeThemes lookup failed:', e.message);
+      }
+      d.pendingOpening = { mediaId: media.id, animeTitle: titleOf(media), cover: media.coverImage?.large || null, list };
+      const options = [
+        ...list.slice(0, 24).map((o) => ({
+          label: ui.clip(`${o.slug} · ${o.song}`, 100),
+          value: o.slug,
+          emoji: kind === 'ED' ? '🎶' : '🎵',
+          description: ui.clip([o.artists.join(', '), o.episodes ? `eps ${o.episodes}` : null].filter(Boolean).join(' · ') || 'AnimeThemes', 100),
+        })),
+        { label: 'Not listed — type it in', value: '_manual', emoji: '⌨️' },
+      ];
+      const children = [
+        ui.text(
+          `### ${kind === 'ED' ? '🎶 Endings' : '🎵 Openings'} · ${ui.esc(titleOf(media))}\n${list.length ? `-# ${list.length} ${word}${list.length === 1 ? '' : 's'} found on AnimeThemes — pick your favorite` : `-# No ${word}s found on AnimeThemes — type it in instead`}`
+        ),
+        ui.select(`s:${kind === 'ED' ? 'ed' : 'op'}:${media.id}`, `Pick the ${word}…`, options),
+        ui.actionRow(ui.button('s:open:back', 'Back to settings', { emoji: '↩️' })),
+      ];
+      const payload = ui.fit([ui.card(ui.ANILIST_BLUE, children)]);
+      try {
+        if (interaction.deferred || interaction.replied) await interaction.editReply(payload);
+        else await interaction.update(payload);
+      } catch (e) {
+        console.error('Song list failed:', e.message);
+      }
+    },
+    async onCancel(interaction) {
+      return respondPanel(interaction);
+    },
+  };
+}
+picker.registerPurpose('op', songPurpose('OP'));
+picker.registerPurpose('ed', songPurpose('ED'));
 
 module.exports = { handleCommand, onComponent, onModal, render, CATEGORIES, getDraft };

@@ -222,7 +222,9 @@ async function statsPayload(ownerId, viewerId, tab = 'month', ym = null) {
     const months = Object.keys(g.su?.months || {}).sort().reverse().slice(0, 24);
     if (months.length > 1) children.push(ui.select(`st:m:${ownerId}`, 'Look at another month…', months.map((m) => ({ label: engine.monthName(m), value: m, default: m === ym }))));
   }
-  return ui.fit([ui.card(g.pal.accent, children)]);
+  const payload = ui.fit([ui.card(g.pal.accent, children)]);
+  await require('./artRoutes').warmPayload(payload);
+  return payload;
 }
 
 /* --------------------------------- /recap --------------------------------- */
@@ -247,7 +249,9 @@ async function recapPayload(ownerId, viewerId, ym, { shareable = true } = {}) {
   children.push(ui.text(`-# ✦ ANITRACKER RECAP\n# ${engine.monthName(ym)}\n-# for <@${ownerId}>`));
   if (!sum || !sum.episodes) {
     children.push(ui.text(`Nothing logged for ${engine.monthName(ym)} yet — recaps fill up automatically as AniList activity comes in.`));
-    return ui.fit([ui.card(g.pal.accent, children)]);
+    const payload = ui.fit([ui.card(g.pal.accent, children)]);
+  await require('./artRoutes').warmPayload(payload);
+  return payload;
   }
 
   let completed = null;
@@ -311,7 +315,9 @@ async function recapPayload(ownerId, viewerId, ym, { shareable = true } = {}) {
   const months = engine.lastMonths(ym, 6);
   children.push(ui.text(`-# \`${ui.sparkline(months.map((m) => g.su?.months?.[m]?.e || 0))}\` your last 6 months · made with AniTracker · /recap`));
   if (shareable && own) children.push(ui.actionRow(ui.button(`rc:share:${ownerId}:${ym}`, 'Share in this channel', { emoji: '📣', style: ui.ButtonStyle.Primary })));
-  return ui.fit([ui.card(g.pal.accent, children)]);
+  const payload = ui.fit([ui.card(g.pal.accent, children)]);
+  await require('./artRoutes').warmPayload(payload);
+  return payload;
 }
 
 /* ------------------------------ leaderboards ------------------------------ */
@@ -561,7 +567,9 @@ async function leaderboardPayload(guildId, board) {
 
   children.push(ui.divider());
   children.push(ui.select('lb:c', 'Switch leaderboard…', res.enabled.map((k) => ({ label: BOARDS[k].label, value: k, emoji: BOARDS[k].emoji, default: k === board }))));
-  return ui.fit([ui.card(meta.accent || ui.ANILIST_BLUE, children)]);
+  const payload = ui.fit([ui.card(meta.accent || ui.ANILIST_BLUE, children)]);
+  await artRoutes.warmPayload(payload);
+  return payload;
 }
 
 /* -------------------------------- handlers -------------------------------- */
@@ -574,10 +582,15 @@ async function onComponent(interaction) {
     // Someone else's public card: give the clicker a private copy instead of changing it for everyone.
     const invoker = interaction.message?.interactionMetadata?.user?.id;
     const isPublic = interaction.message && !interaction.message.flags?.has?.(ui.EPHEMERAL);
+    const resolve = () => (typeof payload === 'function' ? payload() : payload);
     try {
-      if (isPublic && invoker && invoker !== me) return await interaction.reply({ ...payload, flags: ui.V2 | ui.EPHEMERAL });
+      // Acknowledge first: building a card can wait a few seconds for its images.
+      if (isPublic && invoker && invoker !== me) {
+        await interaction.deferReply({ flags: ui.EPHEMERAL });
+        return await interaction.editReply(await resolve());
+      }
       await interaction.deferUpdate();
-      return await interaction.editReply(await (typeof payload === 'function' ? payload() : payload));
+      return await interaction.editReply(await resolve());
     } catch (e) {
       console.error('Stats view update failed:', e.message);
     }
@@ -618,7 +631,7 @@ async function onComponent(interaction) {
     }
   }
   if (ns === 'lb') {
-    return updateOrPrivate(await leaderboardPayload(interaction.guildId, interaction.values[0]));
+    return updateOrPrivate(() => leaderboardPayload(interaction.guildId, interaction.values[0]));
   }
 }
 

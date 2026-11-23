@@ -24,20 +24,26 @@ const { ctx } = require('./ctx');
 const VERSION = 'v1';
 const ROTATION_CARDS = 3; // 4 across is unreadable on phones; 3 keeps text legible
 
-const cache = new Map(); // key -> Buffer
+const cache = new Map(); // key -> { buf, until }
 const inflight = new Map();
 let bytes = 0;
 const MAX_BYTES = 40 * 1024 * 1024;
+// A card where an image failed to load is only kept for a minute, so the
+// next request tries again instead of serving the gap forever.
 function cached(key, paint) {
-  if (cache.has(key)) return Promise.resolve(cache.get(key));
+  const hit = cache.get(key);
+  if (hit && (!hit.until || hit.until > Date.now())) return Promise.resolve(hit.buf);
   if (inflight.has(key)) return inflight.get(key);
+  const missesBefore = art.missCount();
   const p = paint()
     .then((buf) => {
-      cache.set(key, buf);
+      const complete = art.missCount() === missesBefore;
+      if (cache.has(key)) bytes -= cache.get(key).buf.length;
+      cache.set(key, { buf, until: complete ? 0 : Date.now() + 60 * 1000 });
       bytes += buf.length;
       while (cache.size > 150 || bytes > MAX_BYTES) {
         const k = cache.keys().next().value;
-        bytes -= cache.get(k).length;
+        bytes -= cache.get(k).buf.length;
         cache.delete(k);
       }
       return buf;
@@ -99,7 +105,7 @@ function renderRotation(d) {
         return {
           title: m.title?.english || m.title?.romaji || 'Unknown title',
           titleRomaji: m.title?.romaji,
-          cover: m.coverImage?.extraLarge || m.coverImage?.large || null,
+          cover: [m.coverImage?.extraLarge, m.coverImage?.large, m.coverImage?.medium, m.bannerImage].filter(Boolean),
           progress: x.progress,
           total: m.episodes || null,
           aired,
@@ -144,13 +150,89 @@ function renderBannerList(d, label, start = 1) {
         title: m ? m.title?.english || m.title?.romaji : sm.t || 'Unknown title',
         titleRomaji: m?.title?.romaji,
         banner: m?.bannerImage || sm.b || null,
-        cover: m?.coverImage?.extraLarge || m?.coverImage?.large || sm.c || null,
+        cover: [m?.coverImage?.extraLarge, m?.coverImage?.large, sm.c].filter(Boolean),
         detail: String(detail || ''),
         accent: coverColor(m),
         rank: start + i,
       };
     });
     return art.paintBannerList(items, { label });
+  });
+}
+
+/* -------------------------------- favorites -------------------------------- */
+
+// ids: favorite media ids (first 3 shown) · total: count for the header ·
+// border: a colour (number) for every card, or null for each anime's colour.
+function favoritesUrl(ids, total, border = null) {
+  if (!enabled() || !ids?.length) return null;
+  const b = typeof border === 'number' ? border.toString(16).padStart(6, '0') : 'a';
+  return `${publicUrl()}/art/${VERSION}/favorites.png?d=${ids.slice(0, 3).map(Number).join('-')}&n=${Math.max(0, total | 0)}&b=${b}`;
+}
+
+function renderFavorites(d, n, b) {
+  const ids = String(d || '')
+    .split('-')
+    .map((x) => parseInt(x, 10))
+    .filter((x) => x > 0)
+    .slice(0, 3);
+  if (!ids.length) return Promise.reject(new Error('empty'));
+  const border = /^[0-9a-f]{6}$/i.test(String(b || '')) ? parseInt(b, 16) : null;
+  const total = Math.max(ids.length, parseInt(n, 10) || ids.length);
+  return cached(`fav:${ids.join('-')}:${total}:${border ?? 'a'}`, async () => {
+    const media = await getMediaBatch(ids);
+    const items = ids.map((id) => {
+      const m = media.get(id) || {};
+      const title = m.title?.english || m.title?.romaji || 'Unknown title';
+      const alt = m.title?.english && m.title?.romaji && m.title.romaji.toLowerCase() !== m.title.english.toLowerCase() ? m.title.romaji : null;
+      return { title, titleRomaji: m.title?.romaji, subtitle: alt, banner: m.bannerImage || null, cover: [m.coverImage?.extraLarge, m.coverImage?.large].filter(Boolean), accent: coverColor(m) };
+    });
+    return art.paintFavorites(items, { total, border });
+  });
+}
+
+/* ----------------------------- openings / endings ----------------------------- */
+
+// songs: [{ mediaId, slug, song, artists[], animeTitle }]
+function songsUrl(kind, songs) {
+  if (!enabled() || !songs?.length) return null;
+  const d = Buffer.from(JSON.stringify(songs.slice(0, 3).map((x) => [Number(x.mediaId), String(x.slug || '').slice(0, 8), String(x.song || '').slice(0, 60), String((x.artists || []).join(', ')).slice(0, 60), String(x.animeTitle || '').slice(0, 60)]))).toString('base64url');
+  return `${publicUrl()}/art/${VERSION}/songs.png?k=${kind === 'ED' ? 'ED' : 'OP'}&d=${d}`;
+}
+
+function renderSongs(kind, d) {
+  let rows;
+  try {
+    rows = JSON.parse(Buffer.from(String(d), 'base64url').toString('utf8'));
+  } catch {
+    return Promise.reject(new Error('bad data'));
+  }
+  if (!Array.isArray(rows) || !rows.length) return Promise.reject(new Error('empty'));
+  rows = rows.slice(0, 3).filter((r) => Array.isArray(r) && Number(r[0]) > 0);
+  const k = kind === 'ED' ? 'ED' : 'OP';
+  return cached(`songs:${k}:${d}`, async () => {
+    const media = await getMediaBatch(rows.map((r) => r[0])).catch(() => new Map());
+    const songs = rows.map(([id, slug, song, artist, anime]) => {
+      const m = media.get(Number(id));
+      return { slug, song, artist, anime: anime || m?.title?.english || m?.title?.romaji || '', cover: [m?.coverImage?.extraLarge, m?.coverImage?.large, m?.coverImage?.medium].filter(Boolean) };
+    });
+    return art.paintSongs(k, songs);
+  });
+}
+
+/* -------------------------------- featured -------------------------------- */
+
+function featuredUrl(mediaId) {
+  if (!enabled() || !mediaId) return null;
+  return `${publicUrl()}/art/${VERSION}/featured/${Number(mediaId)}.png`;
+}
+
+function renderFeatured(mediaId) {
+  const id = Number(mediaId);
+  return cached(`feat:${id}`, async () => {
+    const m = (await getMediaBatch([id])).get(id);
+    if (!m) throw new Error('empty');
+    return art.paintFeatured({ banner: m.bannerImage, cover: [m.coverImage?.extraLarge, m.coverImage?.large].filter(Boolean) });
   });
 }
 
@@ -194,6 +276,9 @@ function warm(url) {
     const p = u.pathname;
     let job = null;
     if (p.endsWith('/rotation.png')) job = renderRotation(u.searchParams.get('d'));
+    else if (p.endsWith('/favorites.png')) job = renderFavorites(u.searchParams.get('d'), u.searchParams.get('n'), u.searchParams.get('b'));
+    else if (p.endsWith('/songs.png')) job = renderSongs(u.searchParams.get('k'), u.searchParams.get('d'));
+    else if (/\/featured\/\d+\.png$/.test(p)) job = renderFeatured(p.match(/\/featured\/(\d+)\.png$/)[1]);
     else if (p.endsWith('/banners.png')) job = renderBannerList(u.searchParams.get('d'), u.searchParams.get('l'), u.searchParams.get('r'));
     else {
       const lb = p.match(/\/lb\/(\d+)\/(\w+)\.png$/);
@@ -205,6 +290,33 @@ function warm(url) {
   } catch {
     /* ignore */
   }
+}
+
+// Every art URL inside a payload, warmed and waited for together.
+async function warmPayload(payload, ms = 4500) {
+  if (!enabled()) return;
+  let json = '';
+  try {
+    json = JSON.stringify((payload?.components || []).map((c) => (typeof c?.toJSON === 'function' ? c.toJSON() : c)));
+  } catch {
+    return;
+  }
+  const base = publicUrl().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const urls = [...new Set(json.match(new RegExp(`${base}/art/[^"\\s]+`, 'g')) || [])].map((u) => u.replace(/\\u0026/g, '&'));
+  if (!urls.length) return;
+  urls.forEach(warm);
+  const jobs = [...inflight.values()];
+  if (jobs.length) await Promise.race([Promise.allSettled(jobs), new Promise((r) => setTimeout(r, ms))]);
+}
+
+// Same, but wait (up to `ms`) so the image is ready — and any failed cover
+// retried — before the message that shows it is sent.
+async function warmWait(url, ms = 6000) {
+  if (!url) return;
+  warm(url);
+  const jobs = [...inflight.values()];
+  if (!jobs.length) return;
+  await Promise.race([Promise.allSettled(jobs), new Promise((r) => setTimeout(r, ms))]);
 }
 
 /* --------------------------------- router --------------------------------- */
@@ -231,6 +343,31 @@ function buildArtRouter() {
       send(res, await renderRotation(String(req.query.d || '').slice(0, 200)));
     } catch (e) {
       fail(res, 'Rotation', e);
+    }
+  });
+  router.get(`/art/${VERSION}/favorites.png`, async (req, res) => {
+    if (!guard(res)) return;
+    try {
+      send(res, await renderFavorites(String(req.query.d || '').slice(0, 60), req.query.n, String(req.query.b || 'a').slice(0, 6)));
+    } catch (e) {
+      fail(res, 'Favorites', e);
+    }
+  });
+  router.get(`/art/${VERSION}/songs.png`, async (req, res) => {
+    if (!guard(res)) return;
+    try {
+      send(res, await renderSongs(String(req.query.k || 'OP'), String(req.query.d || '').slice(0, 1500)));
+    } catch (e) {
+      fail(res, 'Songs', e);
+    }
+  });
+  router.get(`/art/${VERSION}/featured/:id.png`, async (req, res) => {
+    if (!guard(res)) return;
+    if (!/^\d{1,9}$/.test(req.params.id)) return res.status(400).end();
+    try {
+      send(res, await renderFeatured(req.params.id));
+    } catch (e) {
+      fail(res, 'Featured', e);
     }
   });
   router.get(`/art/${VERSION}/banners.png`, async (req, res) => {
@@ -263,4 +400,4 @@ function buildArtRouter() {
   return router;
 }
 
-module.exports = { buildArtRouter, rotationUrl, bannerListUrl, leaderboardUrl, recapBoardUrl, warm, enabled, ROTATION_CARDS, _render: { renderRotation, renderBannerList, renderLeaderboard, renderRecapBoard } };
+module.exports = { buildArtRouter, rotationUrl, bannerListUrl, favoritesUrl, songsUrl, featuredUrl, leaderboardUrl, recapBoardUrl, warm, warmWait, warmPayload, enabled, cached, coverColor, ROTATION_CARDS, _render: { renderRotation, renderBannerList, renderLeaderboard, renderRecapBoard, renderFavorites, renderSongs, renderFeatured } };

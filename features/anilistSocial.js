@@ -237,7 +237,13 @@ async function getRandomAnime(genre = null, retry = false, tag = null) {
 // https://api.animethemes.moe — openings/endings with song, artists, videos.
 
 const themesCache = cached('animethemes', 60 * 60 * 1000, 300);
-async function getOpenings(anilistId) {
+// Openings (kind 'OP') or endings ('ED') for one anime.
+async function getOpenings(anilistId, kind = 'OP') {
+  const all = await getThemes(anilistId);
+  return all.filter((t) => t.type === (kind === 'ED' ? 'ED' : 'OP'));
+}
+
+async function getThemes(anilistId) {
   return themesCache(Number(anilistId), async () => {
     const include = ['animethemes.animethemeentries.videos', 'animethemes.song', 'animethemes.song.artists'].join(',');
     const url = `https://api.animethemes.moe/anime?filter[has]=resources&filter[site]=AniList&filter[external_id]=${Number(
@@ -249,14 +255,15 @@ async function getOpenings(anilistId) {
     const anime = json.anime?.[0];
     if (!anime) return [];
     return (anime.animethemes || [])
-      .filter((t) => t.type === 'OP')
+      .filter((t) => t.type === 'OP' || t.type === 'ED')
       .sort((a, b) => (a.sequence || 1) - (b.sequence || 1))
       .map((t) => {
         const entry = (t.animethemeentries || [])[0] || {};
         const video = (entry.videos || []).slice().sort((a, b) => (b.resolution || 0) - (a.resolution || 0))[0];
         const artists = (t.song?.artists || t.song?.performances?.map((p) => p.artist).filter(Boolean) || []).map((a) => a.name);
         return {
-          slug: t.slug || `OP${t.sequence || 1}`,
+          type: t.type,
+          slug: t.slug || `${t.type}${t.sequence || 1}`,
           song: t.song?.title || 'Untitled',
           artists,
           episodes: entry.episodes || null,

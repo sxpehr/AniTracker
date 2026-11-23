@@ -1,3 +1,19 @@
+# Nov 23: profile glow-up, post tweaks, spoilers, image fixes
+
+Restore point: `restore/before-nov23` (everything before this batch).
+
+- **Recaps:** category boards are clean numbered lists (`1` @name **28** episodes), no medals, no category emojis.
+- **Rotation cards:** transparent background, no tags; the Watching / Rewatching / Paused pill sits where the tags were.
+- **18+ covers:** new default **"Cover as a spoiler"**: the cover is attached as a Discord spoiler (blurred until clicked). Discord can't spoiler an image *inside* an embed, so it shows as an attachment with the post. Other options: show normally, post without cover, don't post.
+- **Featured anime:** no cover icon, taller/bigger banner, tags as pills, note shown as a heading.
+- **Activity post:** author line is `name 🔥 streak | @discordhandle` (no ✦); profile status sits under it as a `💬` bubble; progress bar right under "Watched episode…"; info order is rating · server score · #popularity · 🔞 · tags last.
+- **Favorite openings + new favorite endings:** up to 3 each (/settings → Profile → Add / remove menu), drawn like the reference card (cover, song, ♪ artist, anime, OP badge, link icon) with a ▶ play button per song.
+- **Favorites:** redesigned card — "✦ FAVORITES · n ─── ✦✦✦" header, banner cards with title, alternate title and coloured bar, glowing border in each anime's colour or the profile theme colour (/settings → Appearance → Favorites border), transparent background.
+- **Missing images (KONOSUBA bug):** every cover now tries extraLarge → large → medium → banner, retries each up to 3×, decodes odd formats through Jimp, and a card with a missing image is only cached for a minute. Profiles, leaderboards and recaps now wait (a few seconds max) for their images to be painted before the message is sent.
+- **ALT badges:** removed everywhere (no alt text on any image).
+
+---
+
 # Classic posts, rotation cards, picture leaderboards, flood protection & portal tools
 
 Merge and Render deploys it. One new dependency (`@napi-rs/canvas`, prebuilt — no setup) draws the new images with the bundled Montserrat font (`assets/fonts`, OFL licence).

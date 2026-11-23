@@ -134,11 +134,12 @@ function stripMarkup(text) {
  * Classic activity post (an embed), with the newer details folded in.
  *
  *  ┌──────────────────────────────────────────────┐
- *  │ (avatar) ✦ Sep 🔥 5 — “losing to my backlog”  │  author line, links to AniList
+ *  │ (avatar) Sep 🔥 5 | @sep                      │  author line, links to AniList
+ *  │ `💬 losing to my backlog`                     │  their profile status, as a bubble
  *  │ Watched episode 7 · Season 2 ▶️               │
- *  │ # Title                                       │
  *  │ ▰▰▰▰▰▰▰▱▱▱▱▱  7 / 12 · 58% · ep 8 in 3 days  │  progress through this season
- *  │ ⭐ 8.4/10 • 🏷️ Isekai, Satire • 👥 8.3 here    │
+ *  │ # Title                                       │
+ *  │ ⭐ 8.4 • 👥 8.3 here • ❤️ #12 • 🔞 • 🏷️ tags   │  tags last
  *  │ short synopsis…                               │
  *  │ [ big cover ]                                 │  full style (thumbnail otherwise)
  *  │ AniList · today at 4:12                       │
@@ -158,6 +159,10 @@ function stripMarkup(text) {
  * @param o.likeCount    current likes
  * @param o.ratingLine   optional extra info (community rating), string
  * @param o.preview      disable buttons (settings preview)
+ * @param o.discordName  their Discord @handle (shown after the name)
+ *
+ * Returns the message payload plus `accent` and `spoilerUrl` (an 18+ cover
+ * the caller attaches as a SPOILER_ file); strip both before sending.
  */
 function buildActivityPost(o) {
   const { username, activity, streak = 0, seasonInfo, look, ownerId, mentionId, cfg = {} } = o;
@@ -173,44 +178,53 @@ function buildActivityPost(o) {
   const embed = new EmbedBuilder().setColor(accent);
   if (activity.createdAt) embed.setTimestamp(new Date(activity.createdAt * 1000));
 
-  // Author line: avatar, name, streak, and their profile status (tagline).
+  // Author line: avatar, name, streak | @their Discord. Their profile status
+  // sits right under it as a bubble, like a Discord custom status.
   const streakBit = show.has('streak') && streak > 0 ? ` 🔥 ${streak}` : '';
-  const tagline = show.has('status') && look?.profile?.tagline ? ` — “${ui.clip(String(look.profile.tagline).replace(/\s+/g, ' '), 70)}”` : '';
-  const author = { name: ui.clip(`✦ ${username}${streakBit}${tagline}`, 250), url: profileUrl };
+  const handle = o.discordName ? ` | @${o.discordName}` : '';
+  const author = { name: ui.clip(`${username}${streakBit}${handle}`, 250), url: profileUrl };
   if (ui.isHttpUrl(o.avatarUrl)) author.iconURL = o.avatarUrl;
   embed.setAuthor(author);
+  const statusText = show.has('status') && look?.profile?.tagline ? ui.clip(String(look.profile.tagline).replace(/\s+/g, ' ').replace(/`/g, 'ˋ'), 90) : null;
+  const bubble = statusText ? `\`💬 ${statusText}\`` : null;
 
   const badges = ownerId ? social.badgesFor(ownerId).map((b) => b.label) : [];
   const footerText = ['AniList', ...badges].join(' • ');
   let components = [];
+  let spoilerUrl = null;
 
   if (activity.__typename === 'ListActivity' && activity.media) {
     const m = activity.media;
     const si = seasonInfo || { rootId: m.id, rootTitle: m.title?.english || m.title?.romaji, rootSiteUrl: m.siteUrl };
     const mature = Boolean(m.isAdult);
-    const hideCover = mature && cfg.mature === 'blur';
+    // 18+ covers: 'blur' (default) sends the cover as a Discord spoiler
+    // (click to reveal) — embeds can't spoiler their own image, so it rides
+    // along as an attachment instead of sitting inside the card.
+    const spoilerCover = mature && cfg.mature === 'blur';
+    const hideCover = mature && cfg.mature === 'hide';
     const words = progressWords(activity);
     const seasonBit = si.season && m.type !== 'MANGA' ? ` · Season ${si.season}` : '';
     const caption = `${statusVerb(activity.status)}${words ? ` ${words}` : ''}${seasonBit} ${statusEmoji(activity.status)}`;
     const heading = style === 'minimal' ? '##' : '#';
-    const parts = [`${caption}\n${heading} [${ui.esc(ui.clip(si.rootTitle || 'Unknown title', 90))}](${si.rootSiteUrl || m.siteUrl})`];
-
-    // Progress through this season, as a bar.
+    const top = [bubble, caption];
+    // Progress through this season, as a bar, right under what they watched.
     const prog = show.has('progress') && style !== 'minimal' ? seasonProgress(activity) : null;
     if (prog) {
       const next = prog.next ? ` · ep ${prog.next.episode} <t:${prog.next.airingAt}:R>` : '';
-      if (prog.total) parts.push(`\`${ui.bar(prog.done, prog.total, 14)}\`  **${prog.done}** / ${prog.total} · ${Math.round(prog.pct)}%${next}`);
-      else if (prog.done) parts.push(`${prog.unit === 'chapter' ? 'Chapter' : 'Episode'} **${prog.done}** · still airing${next}`);
+      if (prog.total) top.push(`\`${ui.bar(prog.done, prog.total, 14)}\`  **${prog.done}** / ${prog.total} · ${Math.round(prog.pct)}%${next}`);
+      else if (prog.done) top.push(`${prog.unit === 'chapter' ? 'Chapter' : 'Episode'} **${prog.done}** · still airing${next}`);
     }
+    const parts = [`${top.filter(Boolean).join('\n')}\n${heading} [${ui.esc(ui.clip(si.rootTitle || 'Unknown title', 90))}](${si.rootSiteUrl || m.siteUrl})`];
 
     if (style !== 'minimal') {
+      // rating · community score · popularity · mature · tags (tags last)
       const info = [];
       if (show.has('rating') && typeof m.averageScore === 'number') info.push(`⭐ ${(m.averageScore / 10).toFixed(1)}/10`);
       if (o.ratingLine) info.push(o.ratingLine);
+      if (show.has('popularity') && si.popularityRank) info.push(`❤️ #${si.popularityRank} Most Popular`);
+      if (mature) info.push(spoilerCover ? '🔞 Mature · cover in spoiler' : hideCover ? '🔞 Mature · cover hidden' : '🔞 Mature');
       const tags = show.has('genres') ? pickTags(m.tags, m.genres, 3) : [];
       if (tags.length) info.push(`🏷️ ${tags.map((t) => ui.esc(t)).join(', ')}`);
-      if (mature) info.push(hideCover ? '🔞 Mature · cover hidden' : '🔞 Mature');
-      if (show.has('popularity') && si.popularityRank) info.push(`❤️ #${si.popularityRank} Most Popular`);
       if (info.length) parts.push(info.join('  •  '));
       if (show.has('description')) {
         const syn = ui.clip(stripDescription(m.description), style === 'compact' ? 100 : 160);
@@ -220,10 +234,11 @@ function buildActivityPost(o) {
     embed.setDescription(ui.clip(parts.join('\n\n'), 4000));
 
     const cover = m.coverImage?.extraLarge || m.coverImage?.large || m.coverImage?.medium || null;
-    if (show.has('cover') && !hideCover && ui.isHttpUrl(cover)) {
+    if (show.has('cover') && !hideCover && !spoilerCover && ui.isHttpUrl(cover)) {
       if (style === 'full') embed.setImage(cover);
       else embed.setThumbnail(cover);
     }
+    if (show.has('cover') && spoilerCover && ui.isHttpUrl(cover)) spoilerUrl = cover;
     embed.setFooter({ text: footerText });
 
     const row = postButtons(si.rootId, m.id, { likeCount: o.likeCount || 0, rateLabel: o.rateLabel });
@@ -232,7 +247,7 @@ function buildActivityPost(o) {
   } else if (activity.__typename === 'TextActivity' || activity.__typename === 'MessageActivity') {
     embed
       .setTitle(activity.__typename === 'TextActivity' ? '💬 Posted a status update' : '💬 Posted a message')
-      .setDescription(ui.clip(stripMarkup(activity.text || activity.message), 600) || '*(image or media post)*')
+      .setDescription(ui.clip(`${bubble ? `${bubble}\n` : ''}${stripMarkup(activity.text || activity.message) || '*(image or media post)*'}`, 700))
       .setFooter({ text: footerText });
     if (ui.isHttpUrl(activity.siteUrl)) embed.setURL(activity.siteUrl);
     embed.setColor(ui.ANILIST_BLUE);
@@ -240,7 +255,7 @@ function buildActivityPost(o) {
     embed.setTitle('📺 New AniList activity').setURL(profileUrl).setFooter({ text: footerText }).setColor(ui.ANILIST_BLUE);
   }
 
-  const payload = { embeds: [embed], components, allowedMentions: mentionId ? { users: [mentionId] } : { parse: [] }, accent };
+  const payload = { embeds: [embed], components, allowedMentions: mentionId ? { users: [mentionId] } : { parse: [] }, accent, spoilerUrl };
   if (mentionId) {
     payload.content = `<@${mentionId}>`;
     payload.flags = MessageFlags.SuppressNotifications; // quiet ping: no sound/push
@@ -252,7 +267,7 @@ function buildActivityPost(o) {
 // (bot was down, AniList was slow…): one embed instead of a flood.
 function buildCatchUpPost({ username, avatarUrl, items, mentionId, color }) {
   const profileUrl = `https://anilist.co/user/${encodeURIComponent(username)}`;
-  const author = { name: `✦ ${username}`, url: profileUrl };
+  const author = { name: username, url: profileUrl };
   if (ui.isHttpUrl(avatarUrl)) author.iconURL = avatarUrl;
   const lines = items.slice(0, 12).map((it) => `${statusEmoji(it.status)} **${ui.esc(ui.clip(it.title, 60))}** — ${it.text}`);
   if (items.length > 12) lines.push(`-# +${items.length - 12} more`);

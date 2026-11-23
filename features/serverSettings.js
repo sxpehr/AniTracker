@@ -98,8 +98,9 @@ async function pageBlocks(page, interaction) {
     blocks.push(ui.text(ui.label('18+ titles')));
     blocks.push(
       ui.select('sv:mature', '18+ titles…', [
-        { label: 'Hide the cover', value: 'blur', emoji: '🌫️', description: 'Post it, but without the cover art (default)', default: cfg.mature === 'blur' },
+        { label: 'Cover as a spoiler', value: 'blur', emoji: '🌫️', description: 'Post it; the cover is blurred until clicked (default)', default: cfg.mature === 'blur' },
         { label: 'Show normally', value: 'show', emoji: '👁️', default: cfg.mature === 'show' },
+        { label: 'Post without the cover', value: 'hide', emoji: '🙈', default: cfg.mature === 'hide' },
         { label: 'Don’t post them', value: 'skip', emoji: '🚫', default: cfg.mature === 'skip' },
       ])
     );
@@ -334,7 +335,7 @@ async function onComponent(interaction) {
       cfg.postManga = v.includes('manga');
       break;
     case 'mature':
-      cfg.mature = ['show', 'blur', 'skip'].includes(v[0]) ? v[0] : 'blur';
+      cfg.mature = ['show', 'blur', 'hide', 'skip'].includes(v[0]) ? v[0] : 'blur';
       break;
     case 'burst':
       cfg.burst = [1, 2, 3, 5, 8].includes(Number(v[0])) ? Number(v[0]) : 3;

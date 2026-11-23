@@ -8,8 +8,8 @@
  *       │ cover │   ← progress ring in the cover's own colour
  *        ╰──────╯
  *     Cyberpunk: Edgerunners
- *   [▭] S1 | [≋] 3 / 10 | ( ▶ Watching )
- *      ( Cyberpunk ) ( Tragedy )        ← AniList tags, not genres
+ *        [▭] S1 | [≋] 3 / 10
+ *          ( ▶ Watching )
  *
  *  Leaderboard: one row per person — rank badge, AniList avatar, name, a
  *  progress bar against the leader, the value, and a small detail line.
@@ -90,21 +90,52 @@ function safeText(s, fallback = '') {
 /* --------------------------------- images -------------------------------- */
 
 const imgCache = new Map(); // url -> Image (small LRU)
-async function loadRemote(url, timeout = 8000) {
+let misses = 0; // images that could not be loaded (artRoutes uses this to avoid caching a broken card)
+const missCount = () => misses;
+
+// Decode with canvas; if that fails (odd JPEG/GIF/WebP variants), convert
+// through Jimp first.
+async function decode(buf) {
+  try {
+    return await lib().loadImage(buf);
+  } catch {
+    const Jimp = require('jimp');
+    const img = await Jimp.read(buf);
+    return lib().loadImage(await img.getBufferAsync(Jimp.MIME_PNG));
+  }
+}
+
+async function loadOne(url, timeout) {
   if (!url || !/^https:\/\//i.test(url)) return null;
   if (imgCache.has(url)) return imgCache.get(url);
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(timeout) });
-    if (!res.ok) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length > 12 * 1024 * 1024) return null;
-    const img = await lib().loadImage(buf);
-    imgCache.set(url, img);
-    if (imgCache.size > 80) imgCache.delete(imgCache.keys().next().value);
-    return img;
-  } catch {
-    return null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': 'AniTracker (Discord bot)', Accept: 'image/*' }, signal: AbortSignal.timeout(timeout) });
+      if (res.status === 404 || res.status === 403) return null; // gone: no point retrying
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (!buf.length || buf.length > 15 * 1024 * 1024) return null;
+      const img = await decode(buf);
+      imgCache.set(url, img);
+      if (imgCache.size > 120) imgCache.delete(imgCache.keys().next().value);
+      return img;
+    } catch {
+      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+    }
   }
+  return null;
+}
+
+// First image that loads from a list of candidates (e.g. extraLarge → large
+// → medium → banner), so one bad URL never leaves a blank circle.
+async function loadRemote(urls, timeout = 10000) {
+  const list = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
+  for (const u of [...new Set(list)]) {
+    const img = await loadOne(u, timeout);
+    if (img) return img;
+  }
+  if (list.length) misses++;
+  return null;
 }
 
 /* -------------------------------- drawing -------------------------------- */
@@ -305,29 +336,19 @@ async function paintRotation(items, { cardW = 460, gap = 26 } = {}) {
   const titleLineH = titleSize * 1.22;
   const metaTop = titleTop + titleLineH * 2 + CW * 0.035;
   const tagTop = metaTop + pillH + CW * 0.055;
-  const CH = Math.round(tagTop + tagH + pad);
+  const CH = Math.round(tagTop + tagH * 1.12 + pad * 0.6);
   const W = n * CW + (n - 1) * gap;
 
   const canvas = createCanvas(W, CH);
   const c = canvas.getContext('2d');
-  const covers = await Promise.all(items.map((it) => loadRemote(it.cover)));
+  const covers = await Promise.all(items.map((it) => loadRemote([].concat(it.cover || []))));
 
   items.forEach((it, i) => {
     const x0 = i * (CW + gap);
     const accent = vivid(typeof it.accent === 'number' ? it.accent : 0x3db4f2);
     const st = STATUS[it.status] || STATUS.CURRENT;
 
-    // Card: near-black, washed with the cover's colour at the top.
-    roundRect(c, x0 + 1, 1, CW - 2, CH - 2, CW * 0.07);
-    const bg = c.createLinearGradient(0, 0, 0, CH);
-    bg.addColorStop(0, css(mix(0x0b0c10, accent, 0.2)));
-    bg.addColorStop(0.55, '#0c0d11');
-    bg.addColorStop(1, '#09090c');
-    c.fillStyle = bg;
-    c.fill();
-    c.lineWidth = 2;
-    c.strokeStyle = css(accent, 0.22);
-    c.stroke();
+    // No card background: transparent, so it sits on the profile itself.
 
     // Progress ring + cover.
     const cx = x0 + CW / 2;
@@ -362,19 +383,17 @@ async function paintRotation(items, { cardW = 460, gap = 26 } = {}) {
     const startY = titleTop + (titleLineH * 2 - block) / 2 + titleSize * 0.95;
     lines.forEach((l, k) => c.fillText(l, cx, startY + k * titleLineH));
 
-    // Meta row: [screen] S1 | [layers] 3 / 10 | (▶ Watching)
+    // Meta row: [screen] S1 | [layers] 3 / 10
     const seasonText = it.format && !['TV', 'TV_SHORT'].includes(it.format) ? (it.format === 'MOVIE' ? 'Movie' : it.format.replace('_', ' ')) : `S${it.season || 1}`;
     const progText = it.progress === null ? '—' : it.total ? `${Math.min(it.progress, it.total)} / ${it.total}` : `${it.progress} / ?`;
-    const statusIcon = it.status === 'PAUSED' ? iconPause : it.status === 'REPEATING' ? iconRepeat : iconPlay;
     let scale = 1;
-    const measure = (s) => {
-      c.font = f(600, metaSize * s);
-      const iconS = metaSize * 1.05 * s;
-      const sep = metaSize * 0.9 * s;
-      const a = iconS + metaSize * 0.4 * s + c.measureText(seasonText).width;
-      const b = iconS + metaSize * 0.4 * s + c.measureText(progText).width;
-      const p = pill(c, 0, 0, { text: st.label, h: pillH * s, font: f(600, metaSize * s), icon: statusIcon, draw: false });
-      return { a, b, p, sep, iconS, total: a + sep * 2 + b + sep * 2 + p };
+    const measure = (k) => {
+      c.font = f(600, metaSize * k);
+      const iconS = metaSize * 1.05 * k;
+      const sep = metaSize * 0.9 * k;
+      const a = iconS + metaSize * 0.4 * k + c.measureText(seasonText).width;
+      const b = iconS + metaSize * 0.4 * k + c.measureText(progText).width;
+      return { a, b, sep, iconS, total: a + sep * 2 + b };
     };
     let m = measure(1);
     while (m.total > CW - pad * 1.2 && scale > 0.6) {
@@ -394,45 +413,19 @@ async function paintRotation(items, { cardW = 460, gap = 26 } = {}) {
       c.fillText(text, x, midY + metaSize * 0.05);
       x += c.measureText(text).width;
     };
-    const divider = () => {
-      x += m.sep;
-      c.fillStyle = '#4a4d55';
-      c.fillRect(x - 1, midY - metaSize * 0.75 * scale, 2, metaSize * 1.5 * scale);
-      x += m.sep;
-    };
     drawPart(iconScreen, seasonText);
-    divider();
+    x += m.sep;
+    c.fillStyle = '#4a4d55';
+    c.fillRect(x - 1, midY - metaSize * 0.75 * scale, 2, metaSize * 1.5 * scale);
+    x += m.sep;
     drawPart(iconLayers, progText);
-    divider();
-    pill(c, x, midY - (pillH * scale) / 2, {
-      text: st.label,
-      h: pillH * scale,
-      font: f(600, metaSize * scale),
-      fg: css(st.color),
-      bg: css(st.color, 0.1),
-      border: css(st.color, 0.9),
-      icon: statusIcon,
-    });
 
-    // Tag pills: as many as fit on one line (max 3), centred.
-    const tagFont = f(600, tagSize);
-    const tags = [];
-    let used = 0;
-    const gapT = CW * 0.025;
-    for (const raw of (it.tags || []).slice(0, 3)) {
-      const t = safeText(raw);
-      if (!t) continue;
-      const label = t.length > 18 ? `${t.slice(0, 17)}…` : t;
-      const w = pill(c, 0, 0, { text: label, h: tagH, font: tagFont, draw: false });
-      if (used + (tags.length ? gapT : 0) + w > CW - pad * 1.4) break;
-      used += (tags.length ? gapT : 0) + w;
-      tags.push({ label, w });
-    }
-    let tx = cx - used / 2;
-    for (const t of tags) {
-      pill(c, tx, tagTop, { text: t.label, h: tagH, font: tagFont, fg: '#e6e7ea', bg: '#1b1d22', border: '#3b3e46' });
-      tx += t.w + gapT;
-    }
+    // Status pill (Watching / Rewatching / Paused) underneath, centred.
+    const statusIcon = it.status === 'PAUSED' ? iconPause : it.status === 'REPEATING' ? iconRepeat : iconPlay;
+    const spH = tagH * 1.12;
+    const spFont = f(700, tagSize * 1.12);
+    const spW = pill(c, 0, 0, { text: st.label, h: spH, font: spFont, icon: statusIcon, draw: false });
+    pill(c, cx - spW / 2, tagTop, { text: st.label, h: spH, font: spFont, fg: css(st.color), bg: css(st.color, 0.12), border: css(st.color, 0.9), icon: statusIcon });
   });
 
   return canvas.toBuffer('image/png');
@@ -585,7 +578,13 @@ async function paintBannerList(items, { label = null } = {}) {
   const H = labelH + items.length * (rowH + gap) - gap;
   const canvas = createCanvas(W, Math.max(H, 10));
   const c = canvas.getContext('2d');
-  const imgs = await Promise.all(items.map((it) => loadRemote(it.banner).then((b) => b || loadRemote(it.cover)).then((img) => ({ img, isBanner: Boolean(it.banner) }))));
+  const imgs = await Promise.all(
+    items.map(async (it) => {
+      const b = it.banner ? await loadRemote([it.banner]) : null;
+      if (b) return { img: b, isBanner: true };
+      return { img: await loadRemote([].concat(it.cover || [])), isBanner: false };
+    })
+  );
   if (label) {
     c.fillStyle = '#9ca0aa';
     c.font = f(700, 26);
@@ -631,4 +630,286 @@ async function paintBannerList(items, { label = null } = {}) {
   return canvas.toBuffer('image/png');
 }
 
-module.exports = { available, paintRotation, paintLeaderboard, paintBannerList, safeText, STATUS, vivid };
+/* -------------------------------- favorites -------------------------------- */
+
+// Four-point sparkle (✦), drawn so it never depends on the font.
+function sparkle(c, x, y, r, color) {
+  c.save();
+  c.fillStyle = color;
+  c.beginPath();
+  c.moveTo(x, y - r);
+  c.quadraticCurveTo(x + r * 0.18, y - r * 0.18, x + r, y);
+  c.quadraticCurveTo(x + r * 0.18, y + r * 0.18, x, y + r);
+  c.quadraticCurveTo(x - r * 0.18, y + r * 0.18, x - r, y);
+  c.quadraticCurveTo(x - r * 0.18, y - r * 0.18, x, y - r);
+  c.fill();
+  c.restore();
+}
+
+/**
+ * Favorites shelf: "✦ FAVORITES · 5 ─── ✦✦✦", then up to three banner cards
+ * (two on top, one wide below) with the title, a coloured bar and an
+ * alternate title. Transparent background; glowing border in each anime's
+ * colour, or one colour for all (the profile theme).
+ * @param items [{ title, subtitle, banner, cover, accent }]
+ * @param o.total     favorites count for the header
+ * @param o.border    number (one colour for all) or null (each anime's colour)
+ */
+async function paintFavorites(items, { total = items.length, border = null } = {}) {
+  const { createCanvas } = lib();
+  const W = 1600;
+  const pad = 26;
+  const gap = 30;
+  const headH = 104;
+  const n = Math.min(3, items.length);
+  const rows = n === 3 ? [[0, 1], [2]] : n === 2 ? [[0, 1]] : [[0]];
+  const rowH = n === 1 ? 420 : 360;
+  const H = pad + headH + rows.length * rowH + (rows.length - 1) * gap + pad;
+  const canvas = createCanvas(W, H);
+  const c = canvas.getContext('2d');
+  const imgs = await Promise.all(
+    items.slice(0, n).map(async (it) => {
+      const b = it.banner ? await loadRemote([it.banner]) : null;
+      if (b) return { img: b, isBanner: true };
+      return { img: await loadRemote([].concat(it.cover || [])), isBanner: false };
+    })
+  );
+
+  // Header.
+  const headCol = '#e9e6f5';
+  const hy = pad + 52;
+  sparkle(c, pad + 30, hy, 24, headCol);
+  c.font = f(600, 58);
+  c.fillStyle = headCol;
+  c.textAlign = 'left';
+  c.textBaseline = 'middle';
+  const label = 'FAVORITES';
+  c.fillText(label, pad + 76, hy + 2);
+  let x = pad + 76 + c.measureText(label).width + 22;
+  c.font = f(500, 58);
+  c.fillStyle = '#b9b5cc';
+  c.fillText(`· ${total}`, x, hy + 2);
+  x += c.measureText(`· ${total}`).width + 34;
+  const starsX = W - pad - 150;
+  const line = c.createLinearGradient(x, 0, starsX - 30, 0);
+  line.addColorStop(0, 'rgba(233,230,245,0.75)');
+  line.addColorStop(1, 'rgba(233,230,245,0.15)');
+  c.fillStyle = line;
+  c.fillRect(x, hy, Math.max(0, starsX - 30 - x), 3);
+  for (let i = 0; i < 3; i++) sparkle(c, starsX + 20 + i * 48, hy, 15, headCol);
+
+  // Cards.
+  let y = pad + headH;
+  rows.forEach((row) => {
+    const cw = (W - pad * 2 - gap * (row.length - 1)) / row.length;
+    row.forEach((idx, k) => {
+      const it = items[idx];
+      const x0 = pad + k * (cw + gap);
+      const accent = vivid(typeof it.accent === 'number' ? it.accent : 0x9d7bff);
+      const edge = typeof border === 'number' ? vivid(border) : accent;
+      const { img, isBanner } = imgs[idx];
+      const r = 30;
+
+      // glow + border
+      c.save();
+      c.shadowColor = css(edge, 0.75);
+      c.shadowBlur = 26;
+      roundRect(c, x0, y, cw, rowH, r);
+      c.fillStyle = '#0d0e13';
+      c.fill();
+      c.restore();
+      drawCover(c, img, x0, y, cw, rowH, { radius: r, focusY: isBanner ? 0.42 : 0.22 });
+
+      // readability fade at the bottom
+      c.save();
+      roundRect(c, x0, y, cw, rowH, r);
+      c.clip();
+      const fade = c.createLinearGradient(0, y + rowH * 0.35, 0, y + rowH);
+      fade.addColorStop(0, 'rgba(6,7,12,0)');
+      fade.addColorStop(1, 'rgba(6,7,12,0.88)');
+      c.fillStyle = fade;
+      c.fillRect(x0, y, cw, rowH);
+      c.restore();
+
+      roundRect(c, x0 + 1.5, y + 1.5, cw - 3, rowH - 3, r);
+      c.lineWidth = 3;
+      c.strokeStyle = css(edge, 0.95);
+      c.stroke();
+
+      // title + subtitle with the coloured bar
+      const wide = row.length === 1;
+      const tSize = wide ? 56 : 50;
+      const sSize = wide ? 30 : 27;
+      const tx = x0 + 70;
+      const maxW = cw - 110;
+      c.font = f(700, tSize);
+      const lines = wrap(c, safeText(it.title, it.titleRomaji) || 'Untitled', wide ? Math.min(maxW, cw * 0.5) : maxW, 2);
+      const sub = it.subtitle ? safeText(it.subtitle) : '';
+      const blockH = lines.length * tSize * 1.12 + (sub ? sSize * 1.5 : 0);
+      const by = y + rowH - 40 - blockH;
+      c.fillStyle = css(accent);
+      roundRect(c, x0 + 40, by + 6, 8, blockH - 8, 4);
+      c.fill();
+      c.fillStyle = '#ffffff';
+      c.textAlign = 'left';
+      c.textBaseline = 'top';
+      c.shadowColor = 'rgba(0,0,0,0.55)';
+      c.shadowBlur = 10;
+      lines.forEach((l, i) => c.fillText(l, tx, by + i * tSize * 1.12));
+      if (sub) {
+        c.font = f(500, sSize);
+        c.fillStyle = '#d6d3e3';
+        c.fillText(ellipsize(c, sub, maxW), tx, by + lines.length * tSize * 1.12 + sSize * 0.35);
+      }
+      c.shadowBlur = 0;
+    });
+    y += rowH + gap;
+  });
+  return canvas.toBuffer('image/png');
+}
+
+/* ----------------------------- openings / endings ----------------------------- */
+
+// ♪ drawn as a shape (the font has no music glyphs).
+function iconNote(c, x, y, s, color) {
+  c.save();
+  c.fillStyle = color;
+  c.strokeStyle = color;
+  c.lineWidth = s * 0.1;
+  c.beginPath();
+  c.ellipse(x + s * 0.3, y + s * 0.78, s * 0.2, s * 0.15, -0.4, 0, Math.PI * 2);
+  c.fill();
+  c.beginPath();
+  c.ellipse(x + s * 0.8, y + s * 0.66, s * 0.2, s * 0.15, -0.4, 0, Math.PI * 2);
+  c.fill();
+  c.beginPath();
+  c.moveTo(x + s * 0.47, y + s * 0.78);
+  c.lineTo(x + s * 0.47, y + s * 0.12);
+  c.lineTo(x + s * 0.97, y + s * 0.02);
+  c.lineTo(x + s * 0.97, y + s * 0.66);
+  c.stroke();
+  c.lineWidth = s * 0.16;
+  c.beginPath();
+  c.moveTo(x + s * 0.47, y + s * 0.18);
+  c.lineTo(x + s * 0.97, y + s * 0.08);
+  c.stroke();
+  c.restore();
+}
+
+function iconLink(c, x, y, s, color) {
+  c.save();
+  c.strokeStyle = color;
+  c.lineWidth = s * 0.1;
+  c.lineCap = 'round';
+  c.lineJoin = 'round';
+  c.beginPath();
+  c.moveTo(x + s * 0.55, y + s * 0.1);
+  c.lineTo(x + s * 0.9, y + s * 0.1);
+  c.lineTo(x + s * 0.9, y + s * 0.45);
+  c.moveTo(x + s * 0.9, y + s * 0.1);
+  c.lineTo(x + s * 0.45, y + s * 0.55);
+  c.moveTo(x + s * 0.75, y + s * 0.62);
+  c.lineTo(x + s * 0.75, y + s * 0.9);
+  c.lineTo(x + s * 0.1, y + s * 0.9);
+  c.lineTo(x + s * 0.1, y + s * 0.25);
+  c.lineTo(x + s * 0.38, y + s * 0.25);
+  c.stroke();
+  c.restore();
+}
+
+/**
+ * Favorite openings / endings card: label, then one row per song — cover,
+ * song title, ♫ artist, anime — with an "OP 1" badge and a link icon.
+ * @param kind  'OP' | 'ED'
+ * @param songs [{ song, artist, anime, slug, cover }]
+ */
+async function paintSongs(kind, songs) {
+  const { createCanvas } = lib();
+  const W = 1200;
+  const pad = 34;
+  const headH = 78;
+  const rowH = 172;
+  const H = pad + headH + songs.length * rowH + pad - 14;
+  const canvas = createCanvas(W, H);
+  const c = canvas.getContext('2d');
+  const covers = await Promise.all(songs.map((x) => loadRemote([].concat(x.cover || []))));
+
+  roundRect(c, 1.5, 1.5, W - 3, H - 3, 30);
+  c.fillStyle = '#060607';
+  c.fill();
+  c.lineWidth = 3;
+  c.strokeStyle = '#2b2d33';
+  c.stroke();
+
+  const label = kind === 'ED' ? (songs.length > 1 ? 'FAVORITE ENDINGS' : 'FAVORITE ENDING') : songs.length > 1 ? 'FAVORITE OPENINGS' : 'FAVORITE OPENING';
+  c.font = f(600, 30);
+  c.fillStyle = '#9b9ea6';
+  c.textAlign = 'left';
+  c.textBaseline = 'middle';
+  c.fillText(label, pad + 6, pad + 26);
+
+  songs.forEach((x, i) => {
+    const y = pad + headH + i * rowH;
+    if (i > 0) {
+      c.fillStyle = '#1c1d22';
+      c.fillRect(pad + 6, y - 14, W - pad * 2 - 12, 2);
+    }
+    const s = 136;
+    drawCover(c, covers[i], pad + 6, y, s, s, { radius: 26, focusY: 0.3 });
+    const tx = pad + 6 + s + 34;
+    const badge = (x.slug || `${kind}1`).replace(/^(OP|ED)(\d+)/i, (m, k, d) => `${k.toUpperCase()} ${d}`);
+    c.font = f(700, 26);
+    const bw = c.measureText(badge).width + 34;
+    const bx = W - pad - 6 - 92 - 22 - bw;
+    const maxW = bx - tx - 20;
+    c.textBaseline = 'alphabetic';
+    c.fillStyle = '#ffffff';
+    c.font = f(700, 44);
+    c.fillText(ellipsize(c, safeText(x.song) || 'Untitled', maxW), tx, y + 46);
+    iconNote(c, tx, y + 64, 32, '#d4d6db');
+    c.fillStyle = '#d4d6db';
+    c.font = f(500, 32);
+    c.fillText(ellipsize(c, safeText(x.artist) || 'Unknown artist', maxW - 44), tx + 44, y + 94);
+    c.fillStyle = '#8b8e96';
+    c.font = f(500, 27);
+    c.fillText(ellipsize(c, safeText(x.anime) || '', maxW), tx, y + 134);
+
+    // badge
+    roundRect(c, bx, y + 2, bw, 44, 12);
+    c.fillStyle = 'rgba(61,180,242,0.14)';
+    c.fill();
+    c.font = f(700, 26);
+    c.fillStyle = '#5cbcf5';
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.fillText(badge, bx + bw / 2, y + 25);
+    c.textAlign = 'left';
+
+    // link box
+    const lx = W - pad - 6 - 92;
+    const ly = y + (s - 92) / 2;
+    roundRect(c, lx, ly, 92, 92, 20);
+    c.fillStyle = '#1d1e22';
+    c.fill();
+    iconLink(c, lx + 26, ly + 26, 40, '#e8e9ec');
+  });
+  return canvas.toBuffer('image/png');
+}
+
+/* -------------------------------- featured -------------------------------- */
+
+// The featured anime's banner, cropped taller so it shows bigger.
+async function paintFeatured({ banner, cover }) {
+  const { createCanvas } = lib();
+  const W = 1500;
+  const H = 640;
+  const canvas = createCanvas(W, H);
+  const c = canvas.getContext('2d');
+  const b = banner ? await loadRemote([banner]) : null;
+  const img = b || (await loadRemote([].concat(cover || [])));
+  if (!img) throw new Error('no image');
+  drawCover(c, img, 0, 0, W, H, { radius: 0, focusY: b ? 0.45 : 0.25 });
+  return canvas.toBuffer('image/png');
+}
+
+module.exports = { available, paintRotation, paintLeaderboard, paintBannerList, paintFavorites, paintSongs, paintFeatured, safeText, STATUS, vivid, missCount, loadRemote };
